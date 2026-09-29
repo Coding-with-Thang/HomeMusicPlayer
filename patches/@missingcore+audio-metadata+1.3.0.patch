@@ -1,0 +1,198 @@
+diff --git a/node_modules/@missingcore/audio-metadata/lib/module/libs/expo-file-system.mjs b/node_modules/@missingcore/audio-metadata/lib/module/libs/expo-file-system.mjs
+index 60de9cd..2f2595f 100644
+--- a/node_modules/@missingcore/audio-metadata/lib/module/libs/expo-file-system.mjs
++++ b/node_modules/@missingcore/audio-metadata/lib/module/libs/expo-file-system.mjs
+@@ -20,7 +20,7 @@ var EncodingType = /*#__PURE__*/function (EncodingType) {
+  */
+ let ExpoFileSystem;
+ try {
+-  ExpoFileSystem = require('expo-file-system');
++  ExpoFileSystem = require('expo-file-system/legacy');
+ } catch {}
+ export default ExpoFileSystem;
+ //# sourceMappingURL=expo-file-system.mjs.map
+\ No newline at end of file
+diff --git a/node_modules/@missingcore/audio-metadata/lib/module/readers/FLACReader.mjs b/node_modules/@missingcore/audio-metadata/lib/module/readers/FLACReader.mjs
+index ebd70e3..aae627e 100644
+--- a/node_modules/@missingcore/audio-metadata/lib/module/readers/FLACReader.mjs
++++ b/node_modules/@missingcore/audio-metadata/lib/module/readers/FLACReader.mjs
+@@ -10,7 +10,7 @@ import { FileReader } from "../utils/FileReader.mjs";
+ */
+ 
+ /** Array of Vorbis Comment field names we'll support. */
+-const VorbisCommentFieldNames = [...['ALBUM', 'ALBUMARTIST', 'ARTIST', 'TITLE', 'TRACKNUMBER'],
++const VorbisCommentFieldNames = [...['ALBUM', 'ALBUMARTIST', 'ARTIST', 'GENRE', 'TITLE', 'TRACKNUMBER'],
+ // We'll support dates that start with the year.
+ ...['DATE', 'ORIGINALDATE', 'ORIGINALYEAR']];
+ /** Vorbis Comment Field Name Metadata Map */
+@@ -18,6 +18,7 @@ const VCFNMetadataMap = {
+   ALBUM: 'album',
+   ALBUMARTIST: 'albumArtist',
+   ARTIST: 'artist',
++  GENRE: 'genre',
+   TITLE: 'name',
+   TRACKNUMBER: 'track',
+   DATE: 'year',
+diff --git a/node_modules/@missingcore/audio-metadata/lib/module/readers/ID3v2Reader.mjs b/node_modules/@missingcore/audio-metadata/lib/module/readers/ID3v2Reader.mjs
+index acbc7f0..4faeca2 100644
+--- a/node_modules/@missingcore/audio-metadata/lib/module/readers/ID3v2Reader.mjs
++++ b/node_modules/@missingcore/audio-metadata/lib/module/readers/ID3v2Reader.mjs
+@@ -22,15 +22,16 @@ import { arrayIncludes } from "../utils/object.mjs";
+ const FrameTypes = {
+   text: [
+   // ID3v2.2 Tag Ids
+-  ...['TAL', 'TP2', 'TP1', 'TT2', 'TRK', 'TYE'],
++  ...['TAL', 'TP2', 'TP1', 'TCO', 'TT2', 'TRK', 'TYE'],
+   // ID3v2.3/4 Tag Ids
+-  ...['TALB', 'TPE2', 'TPE1', 'TIT2', 'TRCK', 'TYER', 'TDRC']],
++  ...['TALB', 'TPE2', 'TPE1', 'TCON', 'TIT2', 'TRCK', 'TYER', 'TDRC']],
+   picture: ['PIC', 'APIC']
+ };
+ const FrameMetadataMap = {
+   TAL: 'album',
+   TP2: 'albumArtist',
+   TP1: 'artist',
++  TCO: 'genre',
+   PIC: 'artwork',
+   TT2: 'name',
+   TRK: 'track',
+@@ -38,6 +39,7 @@ const FrameMetadataMap = {
+   TALB: 'album',
+   TPE2: 'albumArtist',
+   TPE1: 'artist',
++  TCON: 'genre',
+   APIC: 'artwork',
+   TIT2: 'name',
+   TRCK: 'track',
+diff --git a/node_modules/@missingcore/audio-metadata/lib/module/readers/MP4Reader.mjs b/node_modules/@missingcore/audio-metadata/lib/module/readers/MP4Reader.mjs
+index d0759f0..d43a685 100644
+--- a/node_modules/@missingcore/audio-metadata/lib/module/readers/MP4Reader.mjs
++++ b/node_modules/@missingcore/audio-metadata/lib/module/readers/MP4Reader.mjs
+@@ -10,7 +10,7 @@ import { FileReader } from "../utils/FileReader.mjs";
+ */
+ 
+ /** Array of User data atom names we'll support. */
+-const UserDataAtomNames = [...['©alb', 'aART', 'albr', '©ART', '©nam', 'trkn', '©day', 'covr']];
++const UserDataAtomNames = [...['©alb', 'aART', 'albr', '©ART', '©gen', '©nam', 'trkn', '©day', 'covr']];
+ /** User data atom name Metadata Map */
+ const UDTAMetadataMap = {
+   '©alb': 'album',
+@@ -18,6 +18,7 @@ const UDTAMetadataMap = {
+   'albr': 'albumArtist',
+   // `aART` is more preferred.
+   '©ART': 'artist',
++  '©gen': 'genre',
+   '©nam': 'name',
+   'trkn': 'track',
+   '©day': 'year',
+diff --git a/node_modules/@missingcore/audio-metadata/lib/typescript/MetadataExtractor.types.d.ts b/node_modules/@missingcore/audio-metadata/lib/typescript/MetadataExtractor.types.d.ts
+index dd519b1..d8b1c71 100644
+--- a/node_modules/@missingcore/audio-metadata/lib/typescript/MetadataExtractor.types.d.ts
++++ b/node_modules/@missingcore/audio-metadata/lib/typescript/MetadataExtractor.types.d.ts
+@@ -4,6 +4,7 @@ export type AudioMetadata = {
+     albumArtist: string;
+     artist: string;
+     artwork: string;
++    genre: string;
+     name: string;
+     track: number;
+     year: number;
+diff --git a/node_modules/@missingcore/audio-metadata/src/MetadataExtractor.types.ts b/node_modules/@missingcore/audio-metadata/src/MetadataExtractor.types.ts
+index 2f1f946..477190c 100644
+--- a/node_modules/@missingcore/audio-metadata/src/MetadataExtractor.types.ts
++++ b/node_modules/@missingcore/audio-metadata/src/MetadataExtractor.types.ts
+@@ -5,6 +5,7 @@ export type AudioMetadata = {
+   albumArtist: string;
+   artist: string;
+   artwork: string;
++  genre: string;
+   name: string;
+   track: number;
+   year: number;
+diff --git a/node_modules/@missingcore/audio-metadata/src/libs/expo-file-system.ts b/node_modules/@missingcore/audio-metadata/src/libs/expo-file-system.ts
+index 313d63e..8055967 100644
+--- a/node_modules/@missingcore/audio-metadata/src/libs/expo-file-system.ts
++++ b/node_modules/@missingcore/audio-metadata/src/libs/expo-file-system.ts
+@@ -57,7 +57,7 @@ type FileSystem = {
+ let ExpoFileSystem: FileSystem | undefined;
+ 
+ try {
+-  ExpoFileSystem = require('expo-file-system');
++  ExpoFileSystem = require('expo-file-system/legacy');
+ } catch {}
+ 
+ export default ExpoFileSystem;
+diff --git a/node_modules/@missingcore/audio-metadata/src/readers/FLACReader.ts b/node_modules/@missingcore/audio-metadata/src/readers/FLACReader.ts
+index a567a39..6faca2c 100644
+--- a/node_modules/@missingcore/audio-metadata/src/readers/FLACReader.ts
++++ b/node_modules/@missingcore/audio-metadata/src/readers/FLACReader.ts
+@@ -12,7 +12,7 @@ import { FileReader } from '../utils/FileReader';
+ 
+ /** Array of Vorbis Comment field names we'll support. */
+ const VorbisCommentFieldNames = [
+-  ...['ALBUM', 'ALBUMARTIST', 'ARTIST', 'TITLE', 'TRACKNUMBER'],
++  ...['ALBUM', 'ALBUMARTIST', 'ARTIST', 'GENRE', 'TITLE', 'TRACKNUMBER'],
+   // We'll support dates that start with the year.
+   ...['DATE', 'ORIGINALDATE', 'ORIGINALYEAR'],
+ ] as const;
+@@ -24,6 +24,7 @@ const VCFNMetadataMap: Record<FieldName, MetadataKey> = {
+   ALBUM: 'album',
+   ALBUMARTIST: 'albumArtist',
+   ARTIST: 'artist',
++  GENRE: 'genre',
+   TITLE: 'name',
+   TRACKNUMBER: 'track',
+   DATE: 'year',
+diff --git a/node_modules/@missingcore/audio-metadata/src/readers/ID3v2Reader.ts b/node_modules/@missingcore/audio-metadata/src/readers/ID3v2Reader.ts
+index 6d7c83e..7bddcd7 100644
+--- a/node_modules/@missingcore/audio-metadata/src/readers/ID3v2Reader.ts
++++ b/node_modules/@missingcore/audio-metadata/src/readers/ID3v2Reader.ts
+@@ -24,9 +24,9 @@ import { arrayIncludes } from '../utils/object';
+ const FrameTypes = {
+   text: [
+     // ID3v2.2 Tag Ids
+-    ...['TAL', 'TP2', 'TP1', 'TT2', 'TRK', 'TYE'],
++    ...['TAL', 'TP2', 'TP1', 'TCO', 'TT2', 'TRK', 'TYE'],
+     // ID3v2.3/4 Tag Ids
+-    ...['TALB', 'TPE2', 'TPE1', 'TIT2', 'TRCK', 'TYER', 'TDRC'],
++    ...['TALB', 'TPE2', 'TPE1', 'TCON', 'TIT2', 'TRCK', 'TYER', 'TDRC'],
+   ],
+   picture: ['PIC', 'APIC'],
+ } as const;
+@@ -38,6 +38,7 @@ const FrameMetadataMap: Record<FrameId, MetadataKey> = {
+   TAL: 'album',
+   TP2: 'albumArtist',
+   TP1: 'artist',
++  TCO: 'genre',
+   PIC: 'artwork',
+   TT2: 'name',
+   TRK: 'track',
+@@ -46,6 +47,7 @@ const FrameMetadataMap: Record<FrameId, MetadataKey> = {
+   TALB: 'album',
+   TPE2: 'albumArtist',
+   TPE1: 'artist',
++  TCON: 'genre',
+   APIC: 'artwork',
+   TIT2: 'name',
+   TRCK: 'track',
+diff --git a/node_modules/@missingcore/audio-metadata/src/readers/MP4Reader.ts b/node_modules/@missingcore/audio-metadata/src/readers/MP4Reader.ts
+index cd0f2a6..ceb02c0 100644
+--- a/node_modules/@missingcore/audio-metadata/src/readers/MP4Reader.ts
++++ b/node_modules/@missingcore/audio-metadata/src/readers/MP4Reader.ts
+@@ -12,7 +12,7 @@ import { FileReader } from '../utils/FileReader';
+ 
+ /** Array of User data atom names we'll support. */
+ const UserDataAtomNames = [
+-  ...['©alb', 'aART', 'albr', '©ART', '©nam', 'trkn', '©day', 'covr'],
++  ...['©alb', 'aART', 'albr', '©ART', '©gen', '©nam', 'trkn', '©day', 'covr'],
+ ] as const;
+ 
+ type FieldName = (typeof UserDataAtomNames)[number];
+@@ -23,6 +23,7 @@ const UDTAMetadataMap: Record<FieldName, MetadataKey> = {
+   'aART': 'albumArtist',
+   'albr': 'albumArtist', // `aART` is more preferred.
+   '©ART': 'artist',
++  '©gen': 'genre',
+   '©nam': 'name',
+   'trkn': 'track',
+   '©day': 'year',

@@ -27,6 +27,7 @@ import {
 } from "./AudioVisualizer";
 import { DeviceScanScreen } from "./DeviceScanScreen";
 import { MusicLibraryScreen } from "./MusicLibraryScreen";
+import { PcConnectionGuideScreen } from "./PcConnectionGuideScreen";
 import { PlaylistScreen, QueueTrackRow } from "./PlaylistScreen";
 import { SavedPlaylistsScreen } from "./SavedPlaylistsScreen";
 import {
@@ -133,7 +134,13 @@ function AppContent() {
   const [visualizationBackgroundImage, setVisualizationBackgroundImage] =
     useState<string | null>(null);
   const [screen, setScreen] = useState<
-    "player" | "playlist" | "library" | "savedPlaylists" | "scan" | "settings"
+    | "player"
+    | "playlist"
+    | "library"
+    | "savedPlaylists"
+    | "scan"
+    | "settings"
+    | "pcConnectionGuide"
   >("player");
   useEffect(() => {
     AsyncStorage.getItem(PLAYER_POSITION_STORAGE_KEY)
@@ -418,6 +425,7 @@ function AppContent() {
           onRemoteFoldersSave={saveRemoteDirectories}
           onRemoteSync={syncRemote}
           onRemoteTest={checkRemoteConnection}
+          onOpenPcConnectionGuide={() => setScreen("pcConnectionGuide")}
           onPlayerPositionChange={updatePlaylistPlayerPosition}
           onShowFileTypeChange={updateShowFileType}
           onVisualizationEffectChange={updateVisualizationEffect}
@@ -445,6 +453,15 @@ function AppContent() {
           visualizationPrimaryColor={visualizationPrimaryColor}
           visualizationSecondaryColor={visualizationSecondaryColor}
         />
+      </SafeAreaView>
+    );
+  }
+
+  if (screen === "pcConnectionGuide") {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar style={mode === "dark" ? "light" : "dark"} />
+        <PcConnectionGuideScreen onBack={() => setScreen("settings")} />
       </SafeAreaView>
     );
   }

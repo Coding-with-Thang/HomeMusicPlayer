@@ -10,8 +10,13 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.codingwiththang.homeaudioplayer",
       "permissions": [
-        "android.permission.POST_NOTIFICATIONS"
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -34,6 +39,12 @@
       "expo-font",
       "expo-asset",
       "expo-secure-store"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "525666b3-9599-4d61-9fb0-82f9f2844b7a"
+      }
+    },
+    "owner": "coding-with-thang"
   }
 }

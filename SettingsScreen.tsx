@@ -37,6 +37,7 @@ type SettingsScreenProps = {
   onRemoteTest: () => Promise<void>;
   onRemoteFoldersSave: (paths: string[]) => Promise<number>;
   onBack: () => void;
+  onOpenPcConnectionGuide: () => void;
   onPlayerPositionChange: (position: PlaylistPlayerPosition) => void;
   onShowFileTypeChange: (enabled: boolean) => void;
   onVisualizationBackgroundImageChoose: () => void;
@@ -104,6 +105,7 @@ export function SettingsScreen({
   onRemoteTest,
   onRemoteFoldersSave,
   onBack,
+  onOpenPcConnectionGuide,
   onPlayerPositionChange,
   onShowFileTypeChange,
   onVisualizationBackgroundImageChoose,
@@ -417,6 +419,27 @@ export function SettingsScreen({
             Enter the private HTTPS address from Tailscale Serve and the
             six-digit code shown by the companion setup page.
           </Text>
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open PC connection instructions"
+            onPress={onOpenPcConnectionGuide}
+            style={({ pressed }) => [
+              styles.connectionGuideButton,
+              pressed && styles.optionPressed,
+            ]}
+          >
+            <View style={styles.optionIcon}>
+              <Ionicons name="help-circle-outline" color={colors.accent} size={21} />
+            </View>
+            <View style={styles.optionText}>
+              <Text style={styles.optionLabel}>How to connect</Text>
+              <Text style={styles.optionDescription}>
+                Set up the Windows companion and Tailscale step by step.
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" color={colors.muted} size={18} />
+          </Pressable>
 
           <Text style={styles.controlLabel}>TAILSCALE HTTPS ADDRESS</Text>
           <TextInput
@@ -1137,6 +1160,18 @@ const createStyles = (colors: ThemeColors) =>
     marginTop: 20,
     minHeight: 78,
     padding: 14,
+  },
+  connectionGuideButton: {
+    alignItems: "center",
+    backgroundColor: colors.background,
+    borderColor: colors.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 12,
+    marginTop: 18,
+    minHeight: 72,
+    padding: 13,
   },
   remoteInput: {
     backgroundColor: colors.background,

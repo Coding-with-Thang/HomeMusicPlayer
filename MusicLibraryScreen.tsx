@@ -91,7 +91,7 @@ function compareTracks(
 type MusicLibraryScreenProps = {
   hasRemoteConnection: boolean;
   library: LocalTrack[];
-  onAddAll: () => number;
+  onAddAll: (tracks: LocalTrack[]) => number;
   onAddTrack: (track: LocalTrack) => number;
   onBack: () => void;
   onOpenPlaylists: () => void;
@@ -131,6 +131,10 @@ export function MusicLibraryScreen({
   const [showSortPicker, setShowSortPicker] = useState(false);
   const [sourceFilter, setSourceFilter] = useState<"all" | "local" | "remote">(
     "all",
+  );
+  const listExtraData = useMemo(
+    () => ({ isAdvancedView, queuedIds, showFileType }),
+    [isAdvancedView, queuedIds, showFileType],
   );
   const sortLabel =
     SORT_OPTIONS.find((option) => option.field === sortField)?.label ?? "Title";
@@ -303,15 +307,19 @@ export function MusicLibraryScreen({
         {library.length > 0 && (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Add entire library to playlist"
-            onPress={onAddAll}
+            accessibilityLabel={`Add all ${filteredLibrary.length} displayed tracks to queue`}
+            disabled={filteredLibrary.length === 0}
+            onPress={() => onAddAll(filteredLibrary)}
             style={({ pressed }) => [
               styles.addAllButton,
               pressed && styles.addAllButtonPressed,
+              filteredLibrary.length === 0 && styles.disabled,
             ]}
           >
             <Ionicons name="add" color={colors.accent} size={18} />
-            <Text style={styles.addAllText}>Add All</Text>
+            <Text style={styles.addAllText}>
+              Add All ({filteredLibrary.length})
+            </Text>
           </Pressable>
         )}
       </View>
@@ -456,7 +464,7 @@ export function MusicLibraryScreen({
           filteredLibrary.length === 0 && styles.emptyList,
         ]}
         data={filteredLibrary}
-        extraData={{ isAdvancedView, showFileType }}
+        extraData={listExtraData}
         keyExtractor={(item) => item.id}
         ListHeaderComponent={
           isAdvancedView && filteredLibrary.length > 0 ? (
@@ -748,6 +756,9 @@ const createStyles = (colors: ThemeColors) =>
     },
     addAllButtonPressed: {
       backgroundColor: colors.accentSoft,
+    },
+    disabled: {
+      opacity: 0.45,
     },
     addAllText: {
       color: colors.accent,

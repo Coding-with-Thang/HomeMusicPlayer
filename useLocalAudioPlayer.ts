@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Platform } from 'react-native';
+import { Alert, AppState, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getAudioMetadata } from '@missingcore/audio-metadata';
 import { writeTags } from '@dantheman827/taglib-ts/simpleApi.js';
@@ -40,6 +40,7 @@ const QUEUE_STORAGE_KEY = 'home-audio-player.queue.v2';
 const LEGACY_LIBRARY_STORAGE_KEY = 'home-audio-player.library.v1';
 const LEGACY_PLAYLISTS_STORAGE_KEY = 'home-audio-player.playlists.v1';
 const LEGACY_QUEUE_STORAGE_KEY = 'home-audio-player.queue.v1';
+const PERSISTENCE_DELAY_MS = 300;
 
 export type LocalTrack = {
   album?: string;
@@ -214,6 +215,92 @@ export function useLocalAudioPlayer() {
   const remoteConnectionRef = useRef<RemoteConnection | null>(null);
   const remoteTokenRef = useRef<string | null>(null);
   const track = queue[currentIndex] ?? null;
+  const persistenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingPersistenceKeysRef = useRef(new Set<string>());
+  const persistenceWriteRef = useRef<Promise<void>>(Promise.resolve());
+  const persistenceStateRef = useRef({
+    currentIndex,
+    library,
+    queue,
+    savedPlaylists,
+  });
+
+  useEffect(() => {
+    persistenceStateRef.current = {
+      currentIndex,
+      library,
+      queue,
+      savedPlaylists,
+    };
+  }, [currentIndex, library, queue, savedPlaylists]);
+
+  const flushPersistence = useCallback(() => {
+    if (persistenceTimerRef.current) {
+      clearTimeout(persistenceTimerRef.current);
+      persistenceTimerRef.current = null;
+    }
+
+    const keys = [...pendingPersistenceKeysRef.current];
+    if (keys.length === 0) {
+      return persistenceWriteRef.current;
+    }
+    pendingPersistenceKeysRef.current.clear();
+
+    persistenceWriteRef.current = persistenceWriteRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const latest = persistenceStateRef.current;
+        const entries: [string, string][] = keys.map((key) => {
+          if (key === LIBRARY_STORAGE_KEY) {
+            return [key, JSON.stringify(latest.library)];
+          }
+          if (key === PLAYLISTS_STORAGE_KEY) {
+            return [key, JSON.stringify(latest.savedPlaylists)];
+          }
+          const storedQueue: StoredQueue = {
+            currentIndex: latest.currentIndex,
+            tracks: latest.queue,
+          };
+          return [key, JSON.stringify(storedQueue)];
+        });
+
+        try {
+          await AsyncStorage.multiSet(entries);
+        } catch {
+          keys.forEach((key) => pendingPersistenceKeysRef.current.add(key));
+          // Keep the latest snapshots pending so a later change or app
+          // background transition can retry the write.
+        }
+      });
+
+    return persistenceWriteRef.current;
+  }, []);
+
+  const schedulePersistence = useCallback(
+    (key: string) => {
+      pendingPersistenceKeysRef.current.add(key);
+      if (persistenceTimerRef.current) {
+        clearTimeout(persistenceTimerRef.current);
+      }
+      persistenceTimerRef.current = setTimeout(() => {
+        void flushPersistence();
+      }, PERSISTENCE_DELAY_MS);
+    },
+    [flushPersistence]
+  );
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active') {
+        void flushPersistence();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+      void flushPersistence();
+    };
+  }, [flushPersistence]);
 
   useEffect(() => {
     loadRemoteConnection()
@@ -319,13 +406,9 @@ export function useLocalAudioPlayer() {
 
   useEffect(() => {
     if (hasLoadedLibrary.current) {
-      AsyncStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(library)).catch(
-        () => {
-          // Keep the in-memory library available if persistence fails.
-        }
-      );
+      schedulePersistence(LIBRARY_STORAGE_KEY);
     }
-  }, [library]);
+  }, [library, schedulePersistence]);
 
   useEffect(() => {
     let isActive = true;
@@ -376,14 +459,9 @@ export function useLocalAudioPlayer() {
 
   useEffect(() => {
     if (hasLoadedPlaylists.current) {
-      AsyncStorage.setItem(
-        PLAYLISTS_STORAGE_KEY,
-        JSON.stringify(savedPlaylists)
-      ).catch(() => {
-        // Keep playlists available in memory if persistence fails.
-      });
+      schedulePersistence(PLAYLISTS_STORAGE_KEY);
     }
-  }, [savedPlaylists]);
+  }, [savedPlaylists, schedulePersistence]);
 
   const loadTrack = useCallback(
     (nextTrack: LocalTrack, index: number, shouldPlay: boolean) => {
@@ -473,27 +551,21 @@ export function useLocalAudioPlayer() {
 
   useEffect(() => {
     if (hasLoadedQueue.current) {
-      const storedQueue: StoredQueue = {
-        currentIndex,
-        tracks: queue,
-      };
-      AsyncStorage.setItem(
-        QUEUE_STORAGE_KEY,
-        JSON.stringify(storedQueue)
-      ).catch(() => {
-        // Keep the live queue available in memory if persistence fails.
-      });
+      schedulePersistence(QUEUE_STORAGE_KEY);
     }
-  }, [currentIndex, queue]);
+  }, [currentIndex, queue, schedulePersistence]);
 
   const addTracksToQueue = useCallback(
     (tracks: LocalTrack[]) => {
       const queuedIds = new Set(queue.map((queuedTrack) => queuedTrack.id));
-      const uniqueTracks = tracks.filter(
-        (candidate, index, allTracks) =>
-          !queuedIds.has(candidate.id) &&
-          allTracks.findIndex((item) => item.id === candidate.id) === index
-      );
+      const candidateIds = new Set<string>();
+      const uniqueTracks: LocalTrack[] = [];
+      for (const candidate of tracks) {
+        if (!queuedIds.has(candidate.id) && !candidateIds.has(candidate.id)) {
+          candidateIds.add(candidate.id);
+          uniqueTracks.push(candidate);
+        }
+      }
 
       if (uniqueTracks.length === 0) {
         return 0;
@@ -558,7 +630,7 @@ export function useLocalAudioPlayer() {
   );
 
   const addLibraryToQueue = useCallback(
-    () => addTracksToQueue(library),
+    (tracks: LocalTrack[] = library) => addTracksToQueue(tracks),
     [addTracksToQueue, library]
   );
 
@@ -793,6 +865,36 @@ export function useLocalAudioPlayer() {
     []
   );
 
+  const addTracksToSavedPlaylist = useCallback(
+    (playlistId: string, trackIds: string[]) => {
+      if (trackIds.length === 0) {
+        return;
+      }
+
+      setSavedPlaylists((current) =>
+        current.map((playlist) => {
+          if (playlist.id !== playlistId) {
+            return playlist;
+          }
+
+          const existingIds = new Set(playlist.trackIds);
+          const additions: string[] = [];
+          for (const trackId of trackIds) {
+            if (!existingIds.has(trackId)) {
+              existingIds.add(trackId);
+              additions.push(trackId);
+            }
+          }
+
+          return additions.length > 0
+            ? { ...playlist, trackIds: [...playlist.trackIds, ...additions] }
+            : playlist;
+        })
+      );
+    },
+    []
+  );
+
   const removeTrackFromSavedPlaylist = useCallback(
     (playlistId: string, trackId: string) => {
       setSavedPlaylists((current) =>
@@ -817,12 +919,35 @@ export function useLocalAudioPlayer() {
       if (!playlist) {
         return 0;
       }
+      const libraryById = new Map(library.map((item) => [item.id, item]));
       const tracks = playlist.trackIds
-        .map((id) => library.find((item) => item.id === id))
+        .map((id) => libraryById.get(id))
         .filter((item): item is LocalTrack => Boolean(item));
       return addTracksToQueue(tracks);
     },
     [addTracksToQueue, library, savedPlaylists]
+  );
+
+  const playSavedPlaylist = useCallback(
+    (playlistId: string) => {
+      const playlist = savedPlaylists.find((item) => item.id === playlistId);
+      if (!playlist) {
+        return 0;
+      }
+
+      const libraryById = new Map(library.map((item) => [item.id, item]));
+      const tracks = playlist.trackIds
+        .map((id) => libraryById.get(id))
+        .filter((item): item is LocalTrack => Boolean(item));
+      if (tracks.length === 0) {
+        return 0;
+      }
+
+      setQueue(tracks);
+      loadTrack(tracks[0], 0, true);
+      return tracks.length;
+    },
+    [library, loadTrack, savedPlaylists]
   );
 
   const pickTracks = useCallback(async () => {
@@ -1243,8 +1368,10 @@ export function useLocalAudioPlayer() {
       renameSavedPlaylist,
       deleteSavedPlaylist,
       addTrackToSavedPlaylist,
+      addTracksToSavedPlaylist,
       removeTrackFromSavedPlaylist,
       addSavedPlaylistToQueue,
+      playSavedPlaylist,
       connectRemote,
       syncRemote,
       checkRemoteConnection,
@@ -1273,6 +1400,7 @@ export function useLocalAudioPlayer() {
       addLibraryTrackToQueue,
       addSavedPlaylistToQueue,
       addTrackToSavedPlaylist,
+      addTracksToSavedPlaylist,
       checkRemoteConnection,
       browseRemoteDirectories,
       connectRemote,
@@ -1286,6 +1414,7 @@ export function useLocalAudioPlayer() {
       nextTrack,
       pickTracks,
       playTrack,
+      playSavedPlaylist,
       removeTrack,
       previousTrack,
       queue,

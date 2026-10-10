@@ -13,6 +13,7 @@ import {
 import {
   ActivityIndicator,
   Alert,
+  BackHandler,
   Image,
   Pressable,
   ScrollView,
@@ -102,8 +103,10 @@ function AppContent() {
     renameSavedPlaylist,
     deleteSavedPlaylist,
     addTrackToSavedPlaylist,
+    addTracksToSavedPlaylist,
     removeTrackFromSavedPlaylist,
     addSavedPlaylistToQueue,
+    playSavedPlaylist,
     connectRemote,
     syncRemote,
     checkRemoteConnection,
@@ -142,6 +145,37 @@ function AppContent() {
     | "settings"
     | "pcConnectionGuide"
   >("player");
+  const queuedIds = useMemo(
+    () => new Set(queue.map((item) => item.id)),
+    [queue],
+  );
+  const remoteTrackCount = useMemo(
+    () => library.filter((item) => item.source === "remote").length,
+    [library],
+  );
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener(
+      "hardwareBackPress",
+      () => {
+        if (screen === "player") {
+          return false;
+        }
+
+        setScreen(
+          screen === "scan" || screen === "savedPlaylists"
+            ? "library"
+            : screen === "pcConnectionGuide"
+              ? "settings"
+              : "player",
+        );
+        return true;
+      },
+    );
+
+    return () => subscription.remove();
+  }, [screen]);
+
   useEffect(() => {
     AsyncStorage.getItem(PLAYER_POSITION_STORAGE_KEY)
       .then((storedPosition) => {
@@ -176,7 +210,10 @@ function AppContent() {
         if (
           storedEffect === "bars" ||
           storedEffect === "pulse" ||
-          storedEffect === "wave"
+          storedEffect === "wave" ||
+          storedEffect === "spectrum" ||
+          storedEffect === "orbit" ||
+          storedEffect === "kaleidoscope"
         ) {
           setVisualizationEffect(storedEffect);
         }
@@ -333,6 +370,10 @@ function AppContent() {
         <DeviceScanScreen
           onAddToLibrary={addFilesToLibrary}
           onBack={() => setScreen("library")}
+          onRemoteSync={syncRemote}
+          remoteConnection={remoteConnection}
+          remoteStatus={remoteStatus}
+          remoteTrackCount={remoteTrackCount}
         />
       </SafeAreaView>
     );
@@ -351,7 +392,7 @@ function AppContent() {
           onRemoveTrack={removeLibraryTrack}
           onScan={() => setScreen("scan")}
           onUpdateMetadata={updateTrackMetadata}
-          queuedIds={new Set(queue.map((item) => item.id))}
+          queuedIds={queuedIds}
           onSyncRemote={syncRemote}
           hasRemoteConnection={Boolean(remoteConnection)}
           showFileType={showFileType}
@@ -368,10 +409,16 @@ function AppContent() {
           library={library}
           onAddPlaylistToQueue={addSavedPlaylistToQueue}
           onAddTrack={addTrackToSavedPlaylist}
+          onAddTracks={addTracksToSavedPlaylist}
           onBack={() => setScreen("library")}
           onCreate={createSavedPlaylist}
           onDelete={deleteSavedPlaylist}
           onOpenLibrary={() => setScreen("library")}
+          onPlayPlaylist={(playlistId) => {
+            if (playSavedPlaylist(playlistId) > 0) {
+              setScreen("playlist");
+            }
+          }}
           onRemoveTrack={removeTrackFromSavedPlaylist}
           onRename={renameSavedPlaylist}
           playlists={savedPlaylists}
@@ -892,9 +939,9 @@ function AppContent() {
                     <QueueTrackRow
                       index={index}
                       isCurrent={index === currentIndex}
-                      key={`${item.id}-${index}`}
-                      onPress={() => playTrack(index)}
-                      onRemove={() => removeTrack(index)}
+                      key={item.id}
+                      onPlayTrack={playTrack}
+                      onRemoveTrack={removeTrack}
                       showFileType={showFileType}
                       track={item}
                     />

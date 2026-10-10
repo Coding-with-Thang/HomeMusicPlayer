@@ -17,6 +17,7 @@ import {
   type AudioFileInput,
   isSupportedAudioFile,
 } from './useLocalAudioPlayer';
+import type { RemoteConnection } from './remoteServer';
 import { type ThemeColors, useTheme } from './theme';
 
 type ScanDirectory = {
@@ -30,6 +31,10 @@ const SCAN_DIRECTORIES_STORAGE_KEY = 'home-audio-player.scan-directories.v1';
 type DeviceScanScreenProps = {
   onAddToLibrary: (files: AudioFileInput[]) => Promise<number>;
   onBack: () => void;
+  onRemoteSync: () => Promise<number>;
+  remoteConnection: RemoteConnection | null;
+  remoteStatus: 'disconnected' | 'connecting' | 'connected' | 'syncing' | 'error';
+  remoteTrackCount: number;
 };
 
 function getDisplayName(directory: Directory) {
@@ -45,6 +50,14 @@ function getDisplayUri(uri: string) {
     return decodeURIComponent(uri);
   } catch {
     return uri;
+  }
+}
+
+function getNetworkName(baseUrl: string) {
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return baseUrl;
   }
 }
 
@@ -98,6 +111,10 @@ async function collectAudioFiles(root: ScanDirectory) {
 export function DeviceScanScreen({
   onAddToLibrary,
   onBack,
+  onRemoteSync,
+  remoteConnection,
+  remoteStatus,
+  remoteTrackCount,
 }: DeviceScanScreenProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -105,6 +122,7 @@ export function DeviceScanScreen({
   const [hasLoadedDirectories, setHasLoadedDirectories] = useState(false);
   const [isChoosingDirectory, setIsChoosingDirectory] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [isSyncingRemote, setIsSyncingRemote] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -218,6 +236,29 @@ export function DeviceScanScreen({
     }
   };
 
+  const syncRemote = async () => {
+    try {
+      setIsSyncingRemote(true);
+      const count = await onRemoteSync();
+      Alert.alert('Network synced', `${count} tracks are available.`);
+    } catch (error) {
+      Alert.alert(
+        'Sync failed',
+        error instanceof Error ? error.message : 'The connected network could not be reached.'
+      );
+    } finally {
+      setIsSyncingRemote(false);
+    }
+  };
+
+  const isRemoteSyncing = isSyncingRemote || remoteStatus === 'syncing';
+  const remoteStatusLabel =
+    remoteStatus === 'error'
+      ? 'Needs attention'
+      : isRemoteSyncing
+        ? 'Syncing'
+        : 'Connected';
+
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
@@ -246,6 +287,62 @@ export function DeviceScanScreen({
           files found there are saved to your music library.
         </Text>
       </View>
+
+      {remoteConnection && (
+        <View style={styles.networkSection}>
+          <View style={styles.sectionHeader}>
+            <View>
+              <Text style={styles.sectionTitle}>Connected networks</Text>
+              <Text style={styles.sectionSubtitle}>Synced music sources</Text>
+            </View>
+          </View>
+          <View style={styles.networkRow}>
+            <View style={styles.networkIcon}>
+              <Ionicons name="desktop-outline" color={colors.accent} size={21} />
+            </View>
+            <View style={styles.directoryDetails}>
+              <Text numberOfLines={1} style={styles.directoryName}>
+                {getNetworkName(remoteConnection.baseUrl)}
+              </Text>
+              <Text numberOfLines={1} style={styles.directoryUri}>
+                {remoteTrackCount} {remoteTrackCount === 1 ? 'track' : 'tracks'}
+                {remoteConnection.lastSyncAt
+                  ? ` · Synced ${new Date(remoteConnection.lastSyncAt).toLocaleString()}`
+                  : ' · Not synced yet'}
+              </Text>
+              <View style={styles.networkStatus}>
+                <View
+                  style={[
+                    styles.statusDot,
+                    remoteStatus === 'error' && styles.statusDotError,
+                  ]}
+                />
+                <Text style={styles.networkStatusText}>{remoteStatusLabel}</Text>
+              </View>
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Sync ${getNetworkName(remoteConnection.baseUrl)}`}
+              disabled={isRemoteSyncing}
+              onPress={syncRemote}
+              style={({ pressed }) => [
+                styles.syncButton,
+                pressed && styles.addFolderButtonPressed,
+                isRemoteSyncing && styles.scanButtonDisabled,
+              ]}
+            >
+              {isRemoteSyncing ? (
+                <ActivityIndicator color={colors.accent} size="small" />
+              ) : (
+                <Ionicons name="sync" color={colors.accent} size={19} />
+              )}
+              <Text style={styles.syncButtonText}>
+                {isRemoteSyncing ? 'Syncing' : 'Sync'}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
 
       <View style={styles.sectionHeader}>
         <View>
@@ -440,6 +537,66 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 18,
     paddingTop: 22,
+  },
+  networkSection: {
+    paddingTop: 2,
+  },
+  networkRow: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 10,
+    marginHorizontal: 16,
+    marginTop: 10,
+    minHeight: 76,
+    padding: 11,
+  },
+  networkIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.accentSoft,
+    borderRadius: 18,
+    height: 38,
+    justifyContent: 'center',
+    width: 38,
+  },
+  networkStatus: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 5,
+    marginTop: 4,
+  },
+  statusDot: {
+    backgroundColor: '#22a447',
+    borderRadius: 4,
+    height: 7,
+    width: 7,
+  },
+  statusDotError: {
+    backgroundColor: '#b42318',
+  },
+  networkStatusText: {
+    color: colors.secondaryText,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  syncButton: {
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    borderRadius: 11,
+    flexDirection: 'row',
+    gap: 5,
+    minHeight: 38,
+    minWidth: 72,
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  syncButtonText: {
+    color: colors.accent,
+    fontSize: 12,
+    fontWeight: '700',
   },
   sectionTitle: {
     color: colors.text,

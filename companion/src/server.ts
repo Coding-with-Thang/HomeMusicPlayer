@@ -207,12 +207,12 @@ function adminHtml(
 <section><h2>Pair a phone</h2><button id="pair">Generate pairing code</button><h3 id="code"></h3></section>
 <section><h2>Paired devices</h2>${devices}<p><button id="revokeAll" class="danger">Revoke all devices</button></p></section>
 <button id="logout" class="secondary">Sign out</button>`,
-    `const csrf=${JSON.stringify(csrfToken)};const headers={'content-type':'application/json','x-csrf-token':csrf};
+    `const csrf=${JSON.stringify(csrfToken)};const headers={'x-csrf-token':csrf};const jsonHeaders={...headers,'content-type':'application/json'};
 async function json(r){const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'Request failed.');return j}
-document.querySelector('#saveRoots').onclick=async()=>{const libraryRoots=document.querySelector('#roots').value.split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean);document.querySelector('#scan').textContent='Scanning…';try{const j=await json(await fetch('/admin/roots',{method:'POST',headers,body:JSON.stringify({libraryRoots})}));document.querySelector('#scan').textContent=j.count+' tracks indexed'}catch(e){document.querySelector('#scan').textContent='Scan failed: '+e.message}};
+document.querySelector('#saveRoots').onclick=async()=>{const libraryRoots=document.querySelector('#roots').value.split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean);document.querySelector('#scan').textContent='Scanning…';try{const j=await json(await fetch('/admin/roots',{method:'POST',headers:jsonHeaders,body:JSON.stringify({libraryRoots})}));document.querySelector('#scan').textContent=j.count+' tracks indexed'}catch(e){document.querySelector('#scan').textContent='Scan failed: '+e.message}};
 document.querySelector('#pair').onclick=async()=>{try{const j=await json(await fetch('/admin/pair',{method:'POST',headers}));document.querySelector('#code').textContent=j.code+' (expires '+new Date(j.expiresAt).toLocaleTimeString()+')'}catch(e){document.querySelector('#code').textContent=e.message}};
 for(const button of document.querySelectorAll('.revoke'))button.onclick=async()=>{if(confirm('Revoke this device?')){await json(await fetch('/admin/tokens/'+encodeURIComponent(button.dataset.id),{method:'DELETE',headers}));location.reload()}};
-for(const button of document.querySelectorAll('.scope'))button.onclick=async()=>{await json(await fetch('/admin/tokens/'+encodeURIComponent(button.dataset.id)+'/scopes',{method:'PATCH',headers,body:JSON.stringify({mode:button.dataset.mode})}));location.reload()};
+for(const button of document.querySelectorAll('.scope'))button.onclick=async()=>{await json(await fetch('/admin/tokens/'+encodeURIComponent(button.dataset.id)+'/scopes',{method:'PATCH',headers:jsonHeaders,body:JSON.stringify({mode:button.dataset.mode})}));location.reload()};
 document.querySelector('#revokeAll').onclick=async()=>{if(confirm('Revoke every paired device?')){await json(await fetch('/admin/tokens',{method:'DELETE',headers}));location.reload()}};
 document.querySelector('#logout').onclick=async()=>{await fetch('/admin/logout',{method:'POST',headers});location.reload()};`,
     nonce,

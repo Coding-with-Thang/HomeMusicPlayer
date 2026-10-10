@@ -22,6 +22,7 @@ import type {
 import {
   ACCENT_COLORS,
   type AccentColor,
+  normalizeHexColor,
   type ThemeColors,
   type ThemeMode,
   useTheme,
@@ -79,13 +80,22 @@ const positionOptions: {
 ];
 
 const visualizationEffects: {
-  icon: "analytics-outline" | "radio-outline" | "pulse-outline";
+  icon:
+    | "analytics-outline"
+    | "radio-outline"
+    | "pulse-outline"
+    | "options-outline"
+    | "planet-outline"
+    | "sparkles-outline";
   label: string;
   value: VisualizationEffect;
 }[] = [
   { icon: "analytics-outline", label: "Bars", value: "bars" },
   { icon: "radio-outline", label: "Pulse", value: "pulse" },
   { icon: "pulse-outline", label: "Wave", value: "wave" },
+  { icon: "options-outline", label: "Spectrum", value: "spectrum" },
+  { icon: "planet-outline", label: "Orbit", value: "orbit" },
+  { icon: "sparkles-outline", label: "Kaleidoscope", value: "kaleidoscope" },
 ];
 
 const visualizationColors = [
@@ -404,6 +414,12 @@ export function SettingsScreen({
             />
           ))}
         </View>
+        <CustomColorField
+          color={colors.accent}
+          key={`custom-accent-${colors.accent}`}
+          label="accent"
+          onApply={setAccent}
+        />
         </AccordionSection>
 
         <AccordionSection
@@ -813,6 +829,12 @@ export function SettingsScreen({
               />
             ))}
           </View>
+          <CustomColorField
+            color={visualizationPrimaryColor}
+            key={`custom-primary-${visualizationPrimaryColor}`}
+            label="primary visualization"
+            onApply={onVisualizationPrimaryColorChange}
+          />
 
           <Text style={styles.controlLabel}>SECONDARY COLOR</Text>
           <View style={styles.colorOptions}>
@@ -826,6 +848,12 @@ export function SettingsScreen({
               />
             ))}
           </View>
+          <CustomColorField
+            color={visualizationSecondaryColor}
+            key={`custom-secondary-${visualizationSecondaryColor}`}
+            label="secondary visualization"
+            onApply={onVisualizationSecondaryColorChange}
+          />
         </AccordionSection>
       </ScrollView>
     </View>
@@ -950,6 +978,66 @@ function ColorOption({
         )}
       </View>
     </Pressable>
+  );
+}
+
+function CustomColorField({
+  color,
+  label,
+  onApply,
+}: {
+  color: string;
+  label: string;
+  onApply: (color: string) => void;
+}) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const [value, setValue] = useState(color);
+
+  const applyColor = () => {
+    const normalized = normalizeHexColor(value);
+    if (!normalized) {
+      Alert.alert(
+        "Invalid color",
+        "Enter a 3- or 6-digit hex color, such as #7c3aed.",
+      );
+      return;
+    }
+    setValue(normalized);
+    onApply(normalized);
+  };
+
+  return (
+    <View style={styles.customColorRow}>
+      <View
+        accessibilityLabel={`Current ${label} color ${color}`}
+        style={[styles.customColorPreview, { backgroundColor: color }]}
+      />
+      <TextInput
+        accessibilityLabel={`Custom ${label} color`}
+        autoCapitalize="none"
+        autoCorrect={false}
+        maxLength={7}
+        onChangeText={setValue}
+        onSubmitEditing={applyColor}
+        placeholder="#7c3aed"
+        placeholderTextColor={colors.muted}
+        returnKeyType="done"
+        style={styles.customColorInput}
+        value={value}
+      />
+      <Pressable
+        accessibilityLabel={`Apply custom ${label} color`}
+        accessibilityRole="button"
+        onPress={applyColor}
+        style={({ pressed }) => [
+          styles.customColorButton,
+          pressed && styles.optionPressed,
+        ]}
+      >
+        <Text style={styles.customColorButtonText}>Apply</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -1358,6 +1446,7 @@ const createStyles = (colors: ThemeColors) =>
   },
   effectOptions: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 9,
   },
   effectOption: {
@@ -1366,7 +1455,8 @@ const createStyles = (colors: ThemeColors) =>
     borderColor: "transparent",
     borderRadius: 14,
     borderWidth: 1.5,
-    flex: 1,
+    flexBasis: "30%",
+    flexGrow: 1,
     gap: 6,
     paddingHorizontal: 8,
     paddingVertical: 13,
@@ -1408,6 +1498,43 @@ const createStyles = (colors: ThemeColors) =>
     height: 32,
     justifyContent: "center",
     width: 32,
+  },
+  customColorRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 9,
+    marginTop: 12,
+  },
+  customColorPreview: {
+    borderColor: colors.border,
+    borderRadius: 10,
+    borderWidth: 1,
+    height: 40,
+    width: 40,
+  },
+  customColorInput: {
+    backgroundColor: colors.background,
+    borderColor: colors.border,
+    borderRadius: 10,
+    borderWidth: 1,
+    color: colors.text,
+    flex: 1,
+    fontSize: 14,
+    height: 42,
+    paddingHorizontal: 12,
+  },
+  customColorButton: {
+    alignItems: "center",
+    backgroundColor: colors.accentSoft,
+    borderRadius: 10,
+    height: 42,
+    justifyContent: "center",
+    paddingHorizontal: 14,
+  },
+  customColorButtonText: {
+    color: colors.accent,
+    fontSize: 13,
+    fontWeight: "700",
   },
   backgroundCard: {
     alignItems: "center",

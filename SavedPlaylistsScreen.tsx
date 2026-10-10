@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BackHandler,
   FlatList,
   KeyboardAvoidingView,
   Modal,
@@ -18,12 +19,14 @@ import { type ThemeColors, useTheme } from './theme';
 type SavedPlaylistsScreenProps = {
   library: LocalTrack[];
   onAddPlaylistToQueue: (playlistId: string) => number;
-  onAddTrack: (playlistId: string, trackUri: string) => void;
+  onAddTrack: (playlistId: string, trackId: string) => void;
+  onAddTracks: (playlistId: string, trackIds: string[]) => void;
   onBack: () => void;
   onCreate: (name: string) => string | null;
   onDelete: (playlistId: string) => void;
   onOpenLibrary: () => void;
-  onRemoveTrack: (playlistId: string, trackUri: string) => void;
+  onPlayPlaylist: (playlistId: string) => void;
+  onRemoveTrack: (playlistId: string, trackId: string) => void;
   onRename: (playlistId: string, name: string) => boolean;
   playlists: SavedPlaylist[];
 };
@@ -32,10 +35,12 @@ export function SavedPlaylistsScreen({
   library,
   onAddPlaylistToQueue,
   onAddTrack,
+  onAddTracks,
   onBack,
   onCreate,
   onDelete,
   onOpenLibrary,
+  onPlayPlaylist,
   onRemoveTrack,
   onRename,
   playlists,
@@ -59,14 +64,24 @@ export function SavedPlaylistsScreen({
   const configPlaylist = playlists.find(
     (playlist) => playlist.id === configPlaylistId
   );
+  const libraryById = useMemo(
+    () => new Map(library.map((track) => [track.id, track])),
+    [library]
+  );
   const selectedTracks = useMemo(
-    () =>
-      selectedPlaylist
-        ? selectedPlaylist.trackIds
-            .map((id) => library.find((track) => track.id === id))
-            .filter((track): track is LocalTrack => Boolean(track))
-        : [],
-    [library, selectedPlaylist]
+    () => {
+      if (!selectedPlaylist) {
+        return [];
+      }
+      return selectedPlaylist.trackIds
+        .map((id) => libraryById.get(id))
+        .filter((track): track is LocalTrack => Boolean(track));
+    },
+    [libraryById, selectedPlaylist]
+  );
+  const selectedTrackIds = useMemo(
+    () => new Set(selectedPlaylist?.trackIds ?? []),
+    [selectedPlaylist]
   );
   const filteredPickerTracks = useMemo(() => {
     const query = trackSearchQuery.trim().toLocaleLowerCase();
@@ -89,11 +104,13 @@ export function SavedPlaylistsScreen({
         .includes(query)
     );
   }, [library, trackSearchQuery]);
-  const filteredTracksToAdd = selectedPlaylist
-    ? filteredPickerTracks.filter(
-        (track) => !selectedPlaylist.trackIds.includes(track.id)
-      )
-    : [];
+  const filteredTracksToAdd = useMemo(
+    () =>
+      selectedPlaylist
+        ? filteredPickerTracks.filter((track) => !selectedTrackIds.has(track.id))
+        : [],
+    [filteredPickerTracks, selectedPlaylist, selectedTrackIds]
+  );
 
   const closeCreateModal = () => {
     setIsCreateOpen(false);
@@ -149,18 +166,31 @@ export function SavedPlaylistsScreen({
     if (!selectedPlaylist) {
       return;
     }
-    filteredTracksToAdd.forEach((track) =>
-      onAddTrack(selectedPlaylist.id, track.id)
+    onAddTracks(
+      selectedPlaylist.id,
+      filteredTracksToAdd.map((track) => track.id)
     );
   };
 
-  const handleBack = () => {
+  const handleBack = useCallback(() => {
     if (selectedPlaylist) {
       setSelectedPlaylistId(null);
     } else {
       onBack();
     }
-  };
+  }, [onBack, selectedPlaylist]);
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        handleBack();
+        return true;
+      }
+    );
+
+    return () => subscription.remove();
+  }, [handleBack]);
 
   return (
     <View style={styles.screen}>
@@ -209,15 +239,29 @@ export function SavedPlaylistsScreen({
               <View style={styles.detailActions}>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Add songs to playlist"
-                  onPress={() => setIsTrackPickerOpen(true)}
+                  accessibilityLabel={`Play ${selectedPlaylist.name}`}
+                  disabled={selectedTracks.length === 0}
+                  onPress={() => onPlayPlaylist(selectedPlaylist.id)}
                   style={({ pressed }) => [
                     styles.primarySmallButton,
+                    selectedTracks.length === 0 && styles.disabled,
                     pressed && styles.primaryButtonPressed,
                   ]}
                 >
-                  <Ionicons name="add" color="#fff" size={18} />
-                  <Text style={styles.primarySmallText}>Add Songs</Text>
+                  <Ionicons name="play" color="#fff" size={17} />
+                  <Text style={styles.primarySmallText}>Play</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Add songs to playlist"
+                  onPress={() => setIsTrackPickerOpen(true)}
+                  style={({ pressed }) => [
+                    styles.secondarySmallButton,
+                    pressed && styles.buttonPressed,
+                  ]}
+                >
+                  <Ionicons name="add" color={colors.accent} size={18} />
+                  <Text style={styles.secondarySmallText}>Add Songs</Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
@@ -243,7 +287,7 @@ export function SavedPlaylistsScreen({
               selectedTracks.length === 0 && styles.emptyList,
             ]}
             data={selectedTracks}
-            keyExtractor={(item) => item.uri}
+            keyExtractor={(item) => item.id}
             ListEmptyComponent={
               <View style={styles.emptyState}>
                 <Text style={styles.emptyTitle}>No songs in this playlist</Text>
@@ -277,7 +321,7 @@ export function SavedPlaylistsScreen({
                   accessibilityRole="button"
                   accessibilityLabel={`Remove ${item.name} from playlist`}
                   onPress={() =>
-                    onRemoveTrack(selectedPlaylist.id, item.uri)
+                    onRemoveTrack(selectedPlaylist.id, item.id)
                   }
                   style={({ pressed }) => [
                     styles.rowButton,
@@ -614,7 +658,8 @@ export function SavedPlaylistsScreen({
               library.length === 0 && styles.emptyList,
             ]}
             data={filteredPickerTracks}
-            keyExtractor={(item) => item.uri}
+            extraData={selectedTrackIds}
+            keyExtractor={(item) => item.id}
             ListEmptyComponent={
               <View style={styles.emptyState}>
                 <Text style={styles.emptyTitle}>
@@ -650,8 +695,7 @@ export function SavedPlaylistsScreen({
               </View>
             }
             renderItem={({ item }) => {
-              const isAdded =
-                selectedPlaylist?.trackIds.includes(item.id) ?? false;
+              const isAdded = selectedTrackIds.has(item.id);
               return (
                 <View style={styles.pickerRow}>
                   <View style={styles.trackDetails}>
@@ -859,7 +903,12 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     letterSpacing: -0.5,
   },
   detailCount: { color: colors.secondaryText, fontSize: 12, marginTop: 4 },
-  detailActions: { flexDirection: 'row', gap: 7, marginTop: 12 },
+  detailActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7,
+    marginTop: 12,
+  },
   primarySmallButton: {
     alignItems: 'center',
     backgroundColor: colors.accent,

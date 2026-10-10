@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import Slider from "@react-native-community/slider";
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -17,17 +17,17 @@ import type { LocalTrack, RepeatMode } from "./useLocalAudioPlayer";
 type QueueTrackRowProps = {
   index: number;
   isCurrent: boolean;
-  onPress: () => void;
-  onRemove: () => void;
+  onPlayTrack: (index: number) => void;
+  onRemoveTrack: (index: number) => void;
   showFileType: boolean;
   track: LocalTrack;
 };
 
-export function QueueTrackRow({
+export const QueueTrackRow = memo(function QueueTrackRow({
   index,
   isCurrent,
-  onPress,
-  onRemove,
+  onPlayTrack,
+  onRemoveTrack,
   showFileType,
   track,
 }: QueueTrackRowProps) {
@@ -37,7 +37,7 @@ export function QueueTrackRow({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`Play ${track.name} by ${track.artist}`}
-      onPress={onPress}
+      onPress={() => onPlayTrack(index)}
       style={({ pressed }) => [
         styles.trackRow,
         isCurrent && styles.currentTrackRow,
@@ -70,7 +70,7 @@ export function QueueTrackRow({
         accessibilityRole="button"
         accessibilityLabel={`Remove ${track.name} from playlist`}
         hitSlop={8}
-        onPress={onRemove}
+        onPress={() => onRemoveTrack(index)}
         style={({ pressed }) => [
           styles.removeButton,
           pressed && styles.removeButtonPressed,
@@ -80,7 +80,7 @@ export function QueueTrackRow({
       </Pressable>
     </Pressable>
   );
-}
+});
 
 type PlaylistScreenProps = {
   canGoNext: boolean;
@@ -135,6 +135,10 @@ export function PlaylistScreen({
 }: PlaylistScreenProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const listExtraData = useMemo(
+    () => ({ currentIndex, showFileType }),
+    [currentIndex, showFileType],
+  );
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
@@ -200,8 +204,8 @@ export function PlaylistScreen({
           queue.length === 0 && styles.emptyListContent,
         ]}
         data={queue}
-        extraData={showFileType}
-        keyExtractor={(item, index) => `${item.uri}-${index}`}
+        extraData={listExtraData}
+        keyExtractor={(item) => item.id}
         ListEmptyComponent={
           <View style={styles.emptyState}>
             <View style={styles.emptyIcon}>
@@ -229,8 +233,8 @@ export function PlaylistScreen({
           <QueueTrackRow
             index={index}
             isCurrent={index === currentIndex}
-            onPress={() => onPlayTrack(index)}
-            onRemove={() => onRemoveTrack(index)}
+            onPlayTrack={onPlayTrack}
+            onRemoveTrack={onRemoveTrack}
             showFileType={showFileType}
             track={item}
           />

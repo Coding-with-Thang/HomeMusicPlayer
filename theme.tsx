@@ -21,7 +21,7 @@ export const ACCENT_COLORS = [
   "#af52de",
 ] as const;
 
-export type AccentColor = (typeof ACCENT_COLORS)[number];
+export type AccentColor = string;
 
 export type ThemeColors = {
   accent: AccentColor;
@@ -53,6 +53,19 @@ const ACCENT_COLOR_KEY = "home-audio-player.accent-color.v1";
 const DEFAULT_ACCENT: AccentColor = "#fa2d48";
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
+
+export function normalizeHexColor(value: string) {
+  const match = value.trim().match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!match) {
+    return null;
+  }
+
+  const digits =
+    match[1].length === 3
+      ? [...match[1]].map((digit) => `${digit}${digit}`).join("")
+      : match[1];
+  return `#${digits.toLowerCase()}`;
+}
 
 function withAlpha(hex: string, alpha: string) {
   return `${hex}${alpha}`;
@@ -96,11 +109,11 @@ export function ThemeProvider({ children }: PropsWithChildren) {
         if (storedMode === "light" || storedMode === "dark") {
           setModeState(storedMode);
         }
-        if (
-          storedAccent &&
-          ACCENT_COLORS.includes(storedAccent as AccentColor)
-        ) {
-          setAccentState(storedAccent as AccentColor);
+        const normalizedAccent = storedAccent
+          ? normalizeHexColor(storedAccent)
+          : null;
+        if (normalizedAccent) {
+          setAccentState(normalizedAccent);
         }
       })
       .catch(() => {
@@ -113,8 +126,12 @@ export function ThemeProvider({ children }: PropsWithChildren) {
       colors: createColors(mode, accent),
       mode,
       setAccent: (nextAccent) => {
-        setAccentState(nextAccent);
-        AsyncStorage.setItem(ACCENT_COLOR_KEY, nextAccent).catch(() => {});
+        const normalizedAccent = normalizeHexColor(nextAccent);
+        if (!normalizedAccent) {
+          return;
+        }
+        setAccentState(normalizedAccent);
+        AsyncStorage.setItem(ACCENT_COLOR_KEY, normalizedAccent).catch(() => {});
       },
       setMode: (nextMode) => {
         setModeState(nextMode);

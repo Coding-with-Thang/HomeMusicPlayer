@@ -4,6 +4,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getAudioMetadata } from '@missingcore/audio-metadata';
 import { writeTags } from '@dantheman827/taglib-ts/simpleApi.js';
 import {
+  clearPreloadedSource,
+  preload,
   requestNotificationPermissionsAsync,
   setAudioModeAsync,
   useAudioPlayer,
@@ -11,18 +13,27 @@ import {
 } from 'expo-audio';
 import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
+import { getLockScreenArtworkUri } from './lockScreenArtwork';
+import { addAudioRouteListener } from './modules/audio-route';
+import {
+  cacheRemoteTrack,
+  getCachedTrackUri,
+  pruneTrackCache,
+} from './playbackCache';
 import {
   disconnectRemoteServer,
   fetchRemoteDirectories,
-  fetchRemoteLibrary,
   loadRemoteConnection,
   pairRemoteServer,
   remoteArtworkUrl,
   remoteStreamUrl,
+  syncRemoteLibrary,
   testRemoteConnection,
   updateRemoteLibraryRoots,
   updateRemoteTrackMetadata,
   type RemoteConnection,
+  type RemoteLibrarySync,
+  type RemoteTrackDto,
 } from './remoteServer';
 
 const SUPPORTED_EXTENSIONS = new Set([
@@ -41,6 +52,13 @@ const LEGACY_LIBRARY_STORAGE_KEY = 'home-audio-player.library.v1';
 const LEGACY_PLAYLISTS_STORAGE_KEY = 'home-audio-player.playlists.v1';
 const LEGACY_QUEUE_STORAGE_KEY = 'home-audio-player.queue.v1';
 const PERSISTENCE_DELAY_MS = 300;
+const CACHE_AHEAD_TRACK_COUNT = 2;
+const STREAM_STALL_FALLBACK_MS = 4000;
+const FOREGROUND_SYNC_INTERVAL_MS = 30_000;
+const AUTO_RESUME_WINDOW_MS = 10 * 60 * 1000;
+const AUTO_RESUME_DELAY_MS = 750;
+const NEAR_GAPLESS_HANDOFF_SECONDS = 0.15;
+const PRELOAD_MAX_BYTES = 32 * 1024 * 1024;
 
 export type LocalTrack = {
   album?: string;
@@ -51,6 +69,7 @@ export type LocalTrack = {
   name: string;
   extension: string;
   id: string;
+  isAvailable?: boolean;
   remoteId?: string;
   source: 'local' | 'remote';
   uri: string;
@@ -73,6 +92,7 @@ export type SavedPlaylist = {
   id: string;
   name: string;
   trackIds: string[];
+  trackRefs: LocalTrack[];
 };
 
 export type AudioFileInput = {
@@ -80,8 +100,15 @@ export type AudioFileInput = {
   uri: string;
 };
 
+export type LibraryScanResult = {
+  addedCount: number;
+  removedCount: number;
+};
+
 type StoredQueue = {
   currentIndex: number;
+  isShuffleEnabled?: boolean;
+  repeatMode?: RepeatMode;
   tracks: LocalTrack[];
 };
 
@@ -130,10 +157,62 @@ function migrateTrack(value: unknown): LocalTrack | null {
     artist: legacy.artist,
     extension: legacy.extension,
     id: `local:${legacy.uri}`,
+    isAvailable: true,
     name: legacy.name,
     source: 'local',
     uri: legacy.uri,
   };
+}
+
+function mapRemoteTrack(connection: RemoteConnection, item: RemoteTrackDto): LocalTrack {
+  return {
+    album: item.album,
+    albumArtist: item.albumArtist,
+    artist: item.artist,
+    artwork: item.hasArtwork ? remoteArtworkUrl(connection, item.id) : undefined,
+    extension: item.extension,
+    genre: item.genre,
+    id: `remote:${connection.serverId}:${item.id}`,
+    isAvailable: true,
+    name: item.name,
+    remoteId: item.id,
+    source: 'remote',
+    track: item.track,
+    uri: `remote://${connection.serverId}/${item.id}`,
+    year: item.year,
+  };
+}
+
+function sortLibrary(tracks: LocalTrack[]) {
+  return tracks.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function resolvePlaylistTracks(
+  playlist: Pick<SavedPlaylist, 'trackIds' | 'trackRefs'>,
+  library: LocalTrack[]
+) {
+  const libraryById = new Map(library.map((item) => [item.id, item]));
+  const refsById = new Map(playlist.trackRefs.map((item) => [item.id, item]));
+  return playlist.trackIds
+    .map((id) => libraryById.get(id) ?? refsById.get(id))
+    .filter((item): item is LocalTrack => Boolean(item));
+}
+
+function backfillPlaylistTrackRefs(
+  playlists: SavedPlaylist[],
+  library: LocalTrack[]
+) {
+  const libraryById = new Map(library.map((item) => [item.id, item]));
+  return playlists.map((playlist) => {
+    const knownIds = new Set(playlist.trackRefs.map((item) => item.id));
+    const missingRefs = playlist.trackIds
+      .filter((id) => !knownIds.has(id))
+      .map((id) => libraryById.get(id))
+      .filter((item): item is LocalTrack => Boolean(item));
+    return missingRefs.length > 0
+      ? { ...playlist, trackRefs: [...playlist.trackRefs, ...missingRefs] }
+      : playlist;
+  });
 }
 
 async function createLocalTrack(file: AudioFileInput): Promise<LocalTrack> {
@@ -182,6 +261,7 @@ async function createLocalTrack(file: AudioFileInput): Promise<LocalTrack> {
     name,
     extension: extension.toUpperCase(),
     id: `local:${file.uri}`,
+    isAvailable: true,
     source: 'local',
     uri: file.uri,
     track,
@@ -189,12 +269,21 @@ async function createLocalTrack(file: AudioFileInput): Promise<LocalTrack> {
   };
 }
 
-export function useLocalAudioPlayer() {
+export type HeadsetOptions = {
+  pauseOnHeadphoneDisconnect?: boolean;
+  resumeOnHeadphoneReconnect?: boolean;
+};
+
+export function useLocalAudioPlayer({
+  pauseOnHeadphoneDisconnect = true,
+  resumeOnHeadphoneReconnect = false,
+}: HeadsetOptions = {}) {
   const player = useAudioPlayer(null, { updateInterval: 250 });
   const status = useAudioPlayerStatus(player);
   const [queue, setQueue] = useState<LocalTrack[]>([]);
   const [library, setLibrary] = useState<LocalTrack[]>([]);
   const [savedPlaylists, setSavedPlaylists] = useState<SavedPlaylist[]>([]);
+  const libraryRef = useRef<LocalTrack[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isPicking, setIsPicking] = useState(false);
   const [remoteConnection, setRemoteConnection] =
@@ -206,11 +295,25 @@ export function useLocalAudioPlayer() {
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [isShuffleEnabled, setIsShuffleEnabled] = useState(false);
   const [repeatMode, setRepeatMode] = useState<RepeatMode>('off');
+  const [isPlaybackRequested, setIsPlaybackRequested] = useState(false);
   const hasHandledFinish = useRef(false);
   const hasLoadedLibrary = useRef(false);
   const hasLoadedPlaylists = useRef(false);
   const hasLoadedQueue = useRef(false);
   const hasRestoredRemoteSource = useRef(false);
+  const hasAutoSyncedRemote = useRef(false);
+  const playbackErrorTrackIdRef = useRef<string | null>(null);
+  const recoveredTrackIdRef = useRef<string | null>(null);
+  const streamingTrackIdRef = useRef<string | null>(null);
+  const cacheWindowRef = useRef<LocalTrack[]>([]);
+  const cacheDownloadsRef = useRef(new Map<string, AbortController>());
+  const failedCacheIdsRef = useRef(new Set<string>());
+  const isCachingRef = useRef(false);
+  const preloadedSourceRef = useRef<{ id: string; uri: string } | null>(null);
+  const [cacheRevision, setCacheRevision] = useState(0);
+  const playbackRequestedRef = useRef(false);
+  const nativeWasPlayingRef = useRef(false);
+  const unavailableTrackIdsRef = useRef(new Set<string>());
   const notificationPermissionRequest = useRef<Promise<unknown> | null>(null);
   const remoteConnectionRef = useRef<RemoteConnection | null>(null);
   const remoteTokenRef = useRef<string | null>(null);
@@ -220,19 +323,76 @@ export function useLocalAudioPlayer() {
   const persistenceWriteRef = useRef<Promise<void>>(Promise.resolve());
   const persistenceStateRef = useRef({
     currentIndex,
+    isShuffleEnabled,
     library,
     queue,
+    repeatMode,
     savedPlaylists,
   });
 
+  const autoPausedAtRef = useRef<number | null>(null);
+  const headsetOptionsRef = useRef({
+    pauseOnHeadphoneDisconnect,
+    resumeOnHeadphoneReconnect,
+  });
+  const remoteCommandHandlersRef = useRef({
+    next: () => undefined as void,
+    previous: () => undefined as void,
+    resume: () => undefined as void,
+  });
+
   useEffect(() => {
+    headsetOptionsRef.current = {
+      pauseOnHeadphoneDisconnect,
+      resumeOnHeadphoneReconnect,
+    };
+  }, [pauseOnHeadphoneDisconnect, resumeOnHeadphoneReconnect]);
+
+  const setPlaybackIntent = useCallback((shouldPlay: boolean) => {
+    playbackRequestedRef.current = shouldPlay;
+    if (shouldPlay) {
+      autoPausedAtRef.current = null;
+    }
+    setIsPlaybackRequested(shouldPlay);
+  }, []);
+
+  useEffect(() => {
+    const subscription = player.addListener(
+      'playbackStatusUpdate',
+      (nextStatus) => {
+        if (nextStatus.playing) {
+          nativeWasPlayingRef.current = true;
+          setPlaybackIntent(true);
+        } else if (
+          nativeWasPlayingRef.current &&
+          !nextStatus.isBuffering
+        ) {
+          nativeWasPlayingRef.current = false;
+          setPlaybackIntent(false);
+        }
+      }
+    );
+    return () => subscription.remove();
+  }, [player, setPlaybackIntent]);
+
+  useEffect(() => {
+    libraryRef.current = library;
     persistenceStateRef.current = {
       currentIndex,
+      isShuffleEnabled,
       library,
       queue,
+      repeatMode,
       savedPlaylists,
     };
-  }, [currentIndex, library, queue, savedPlaylists]);
+  }, [
+    currentIndex,
+    isShuffleEnabled,
+    library,
+    queue,
+    repeatMode,
+    savedPlaylists,
+  ]);
 
   const flushPersistence = useCallback(() => {
     if (persistenceTimerRef.current) {
@@ -259,6 +419,8 @@ export function useLocalAudioPlayer() {
           }
           const storedQueue: StoredQueue = {
             currentIndex: latest.currentIndex,
+            isShuffleEnabled: latest.isShuffleEnabled,
+            repeatMode: latest.repeatMode,
             tracks: latest.queue,
           };
           return [key, JSON.stringify(storedQueue)];
@@ -285,6 +447,14 @@ export function useLocalAudioPlayer() {
       persistenceTimerRef.current = setTimeout(() => {
         void flushPersistence();
       }, PERSISTENCE_DELAY_MS);
+    },
+    [flushPersistence]
+  );
+
+  const persistImmediately = useCallback(
+    (key: string) => {
+      pendingPersistenceKeysRef.current.add(key);
+      void flushPersistence();
     },
     [flushPersistence]
   );
@@ -339,6 +509,12 @@ export function useLocalAudioPlayer() {
     }
 
     let isCurrentTrack = true;
+    const remoteToken = remoteTokenRef.current;
+    const lockScreenMetadata = {
+      title: track.name,
+      artist: track.artist,
+      ...(track.album ? { albumTitle: track.album } : {}),
+    };
 
     const activateMediaControls = async () => {
       if (Platform.OS === 'android') {
@@ -354,15 +530,23 @@ export function useLocalAudioPlayer() {
       player.setActiveForLockScreen(
         true,
         {
-          title: track.name,
-          artist: track.artist,
-          ...(track.album ? { albumTitle: track.album } : {}),
+          ...lockScreenMetadata,
+          ...(track.artwork && track.source === 'local'
+            ? { artworkUrl: track.artwork }
+            : {}),
         },
         {
-          showSeekBackward: true,
-          showSeekForward: true,
+          showSeekBackward: false,
+          showSeekForward: false,
         }
       );
+
+      if (track.source === 'remote' && remoteToken) {
+        const artworkUrl = await getLockScreenArtworkUri(track, remoteToken);
+        if (artworkUrl && isCurrentTrack) {
+          player.updateLockScreenMetadata({ ...lockScreenMetadata, artworkUrl });
+        }
+      }
     };
 
     activateMediaControls().catch(() => {
@@ -389,7 +573,14 @@ export function useLocalAudioPlayer() {
 
         const parsed = JSON.parse(storedLibrary) as LocalTrack[];
         if (Array.isArray(parsed)) {
-          setLibrary(parsed.map(migrateTrack).filter((item): item is LocalTrack => Boolean(item)));
+          const restoredLibrary = parsed
+            .map(migrateTrack)
+            .filter((item): item is LocalTrack => Boolean(item));
+          libraryRef.current = restoredLibrary;
+          setLibrary(restoredLibrary);
+          setSavedPlaylists((current) =>
+            backfillPlaylistTrackRefs(current, restoredLibrary)
+          );
         }
       })
       .catch(() => {
@@ -427,21 +618,33 @@ export function useLocalAudioPlayer() {
           trackUris?: string[];
         })[];
         if (Array.isArray(parsed)) {
-          setSavedPlaylists(
-            parsed
-              .filter(
-                (item) =>
+          const restoredPlaylists = parsed
+            .filter(
+              (item) =>
                 typeof item?.id === 'string' &&
                 typeof item?.name === 'string' &&
-                  (Array.isArray(item?.trackIds) || Array.isArray(item?.trackUris))
-              )
-              .map((item) => ({
-                id: item.id!,
-                name: item.name!,
-                trackIds: Array.isArray(item.trackIds)
-                  ? item.trackIds
-                  : (item.trackUris ?? []).map((uri) => `local:${uri}`),
-              }))
+                (Array.isArray(item?.trackIds) ||
+                  Array.isArray(item?.trackUris))
+            )
+            .map((item) => ({
+              id: item.id!,
+              name: item.name!,
+              trackIds: Array.isArray(item.trackIds)
+                ? item.trackIds
+                : (item.trackUris ?? []).map((uri) => `local:${uri}`),
+              trackRefs: Array.isArray(item.trackRefs)
+                ? item.trackRefs
+                    .map(migrateTrack)
+                    .filter(
+                      (track): track is LocalTrack => Boolean(track)
+                    )
+                : [],
+            }));
+          setSavedPlaylists(
+            backfillPlaylistTrackRefs(
+              restoredPlaylists,
+              libraryRef.current
+            )
           );
         }
       })
@@ -459,23 +662,58 @@ export function useLocalAudioPlayer() {
 
   useEffect(() => {
     if (hasLoadedPlaylists.current) {
-      schedulePersistence(PLAYLISTS_STORAGE_KEY);
+      persistImmediately(PLAYLISTS_STORAGE_KEY);
     }
-  }, [savedPlaylists, schedulePersistence]);
+  }, [persistImmediately, savedPlaylists]);
+
+  const isTrackSourceAvailable = useCallback((candidate: LocalTrack) => {
+    if (candidate.isAvailable === false) {
+      return false;
+    }
+    if (candidate.source === 'local') {
+      try {
+        return new File(candidate.uri).exists;
+      } catch {
+        return false;
+      }
+    }
+
+    if (getCachedTrackUri(candidate)) {
+      return true;
+    }
+    const connection = remoteConnectionRef.current;
+    return Boolean(
+      connection &&
+        remoteTokenRef.current &&
+        candidate.remoteId &&
+        candidate.id.startsWith(`remote:${connection.serverId}:`)
+    );
+  }, []);
 
   const loadTrack = useCallback(
     (nextTrack: LocalTrack, index: number, shouldPlay: boolean) => {
+      setPlaybackIntent(false);
+      nativeWasPlayingRef.current = false;
+      if (recoveredTrackIdRef.current !== nextTrack.id) {
+        recoveredTrackIdRef.current = null;
+      }
       player.pause();
-      if (nextTrack.source === 'remote') {
+      if (!isTrackSourceAvailable(nextTrack)) {
+        player.replace(null);
+        setCurrentIndex(index);
+        return false;
+      }
+
+      const cachedUri =
+        nextTrack.source === 'remote' ? getCachedTrackUri(nextTrack) : null;
+      streamingTrackIdRef.current =
+        nextTrack.source === 'remote' && !cachedUri ? nextTrack.id : null;
+      if (cachedUri) {
+        player.replace({ uri: cachedUri, name: nextTrack.name });
+      } else if (nextTrack.source === 'remote') {
         const activeConnection = remoteConnectionRef.current;
         const activeToken = remoteTokenRef.current;
-        if (!activeConnection || !activeToken || !nextTrack.remoteId) {
-          player.replace(null);
-          setRemoteError('Connect to the PC before playing this track.');
-          setRemoteStatus('error');
-          setCurrentIndex(index);
-          return;
-        }
+        if (!activeConnection || !activeToken || !nextTrack.remoteId) return false;
         player.replace({
           headers: { Authorization: `Bearer ${activeToken}` },
           name: nextTrack.name,
@@ -486,11 +724,191 @@ export function useLocalAudioPlayer() {
       }
       setCurrentIndex(index);
       if (shouldPlay) {
+        setPlaybackIntent(true);
         player.play();
       }
+      return true;
     },
-    [player]
+    [isTrackSourceAvailable, player, setPlaybackIntent]
   );
+
+  const loadFirstAvailableTrack = useCallback(
+    (
+      tracks: LocalTrack[],
+      startIndex: number,
+      shouldPlay: boolean,
+      allowWrap: boolean,
+      skippedIds: Set<string> = new Set()
+    ) => {
+      for (let offset = 0; offset < tracks.length; offset += 1) {
+        const candidateIndex = startIndex + offset;
+        if (!allowWrap && candidateIndex >= tracks.length) {
+          break;
+        }
+        const index = candidateIndex % tracks.length;
+        const candidate = tracks[index];
+        if (
+          candidate &&
+          !skippedIds.has(candidate.id) &&
+          loadTrack(candidate, index, shouldPlay)
+        ) {
+          return true;
+        }
+      }
+      return false;
+    },
+    [loadTrack]
+  );
+
+  const peekNextPlayableTrack = useCallback(
+    (fromCompletion: boolean) => {
+      if (!track) {
+        return null;
+      }
+      if (fromCompletion && repeatMode === 'one') {
+        return { candidate: track, index: currentIndex };
+      }
+      const skippedIds = fromCompletion
+        ? new Set<string>()
+        : unavailableTrackIdsRef.current;
+      if (isShuffleEnabled && queue.length > 1) {
+        const candidates = queue
+          .map((candidate, index) => ({ candidate, index }))
+          .filter(
+            ({ candidate, index }) =>
+              index !== currentIndex &&
+              !skippedIds.has(candidate.id) &&
+              isTrackSourceAvailable(candidate)
+          );
+        return candidates[0] ?? null;
+      }
+      for (let offset = 1; offset <= queue.length; offset += 1) {
+        const candidateIndex = currentIndex + offset;
+        if (repeatMode !== 'all' && candidateIndex >= queue.length) {
+          break;
+        }
+        const index = candidateIndex % queue.length;
+        const candidate = queue[index];
+        if (
+          candidate &&
+          !skippedIds.has(candidate.id) &&
+          isTrackSourceAvailable(candidate)
+        ) {
+          return { candidate, index };
+        }
+      }
+      return null;
+    },
+    [currentIndex, isShuffleEnabled, isTrackSourceAvailable, queue, repeatMode, track]
+  );
+
+  const getPlayableSource = useCallback((candidate: LocalTrack) => {
+    if (candidate.source === 'local') {
+      return { uri: candidate.uri, name: candidate.name };
+    }
+    const cachedUri = getCachedTrackUri(candidate);
+    if (cachedUri) {
+      return { uri: cachedUri, name: candidate.name };
+    }
+    const activeConnection = remoteConnectionRef.current;
+    const activeToken = remoteTokenRef.current;
+    if (!activeConnection || !activeToken || !candidate.remoteId) {
+      return null;
+    }
+    return {
+      headers: { Authorization: `Bearer ${activeToken}` },
+      name: candidate.name,
+      uri: remoteStreamUrl(activeConnection, candidate.remoteId),
+    };
+  }, []);
+
+  const releasePreloadedSource = useCallback(() => {
+    const previous = preloadedSourceRef.current;
+    preloadedSourceRef.current = null;
+    if (previous) {
+      void clearPreloadedSource({ uri: previous.uri }).catch(() => undefined);
+    }
+  }, []);
+
+  const runCacheDownloads = useCallback(async () => {
+    if (isCachingRef.current) {
+      return;
+    }
+    isCachingRef.current = true;
+    try {
+      while (true) {
+        const connection = remoteConnectionRef.current;
+        const token = remoteTokenRef.current;
+        const nextTrack = cacheWindowRef.current.find(
+          (candidate) =>
+            !failedCacheIdsRef.current.has(candidate.id) &&
+            !getCachedTrackUri(candidate)
+        );
+        if (!connection || !token || !nextTrack?.remoteId) {
+          return;
+        }
+
+        const controller = new AbortController();
+        cacheDownloadsRef.current.set(nextTrack.id, controller);
+        try {
+          await cacheRemoteTrack(
+            nextTrack,
+            remoteStreamUrl(connection, nextTrack.remoteId),
+            token,
+            controller.signal
+          );
+        } catch {
+          if (!controller.signal.aborted) {
+            failedCacheIdsRef.current.add(nextTrack.id);
+          }
+        } finally {
+          cacheDownloadsRef.current.delete(nextTrack.id);
+          if (getCachedTrackUri(nextTrack)) {
+            setCacheRevision((current) => current + 1);
+          }
+        }
+      }
+    } finally {
+      isCachingRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    const cacheWindow: LocalTrack[] = [];
+    if (remoteConnection && remoteToken && currentIndex >= 0) {
+      for (let offset = 0; offset <= CACHE_AHEAD_TRACK_COUNT; offset += 1) {
+        const index = currentIndex + offset;
+        if (offset >= queue.length || (index >= queue.length && repeatMode !== 'all')) {
+          break;
+        }
+        const candidate = queue[index % queue.length];
+        if (
+          candidate?.source === 'remote' &&
+          candidate.remoteId &&
+          candidate.isAvailable !== false
+        ) {
+          cacheWindow.push(candidate);
+        }
+      }
+    }
+
+    const windowIds = new Set(cacheWindow.map((candidate) => candidate.id));
+    for (const [trackId, controller] of cacheDownloadsRef.current) {
+      if (!windowIds.has(trackId)) controller.abort();
+    }
+    cacheWindowRef.current = cacheWindow;
+    failedCacheIdsRef.current.clear();
+    pruneTrackCache(cacheWindow);
+    void runCacheDownloads();
+  }, [currentIndex, queue, remoteConnection, remoteToken, repeatMode, runCacheDownloads]);
+
+  useEffect(() => {
+    const downloads = cacheDownloadsRef.current;
+    return () => {
+      cacheWindowRef.current = [];
+      for (const controller of downloads.values()) controller.abort();
+    };
+  }, []);
 
   useEffect(() => {
     if (
@@ -534,6 +952,14 @@ export function useLocalAudioPlayer() {
             ? Math.min(Math.max(parsed.currentIndex, 0), restoredQueue.length - 1)
             : 0;
 
+        setIsShuffleEnabled(parsed.isShuffleEnabled === true);
+        if (
+          parsed.repeatMode === 'off' ||
+          parsed.repeatMode === 'all' ||
+          parsed.repeatMode === 'one'
+        ) {
+          setRepeatMode(parsed.repeatMode);
+        }
         setQueue(restoredQueue);
         loadTrack(restoredQueue[restoredIndex], restoredIndex, false);
       })
@@ -551,9 +977,15 @@ export function useLocalAudioPlayer() {
 
   useEffect(() => {
     if (hasLoadedQueue.current) {
-      schedulePersistence(QUEUE_STORAGE_KEY);
+      persistImmediately(QUEUE_STORAGE_KEY);
     }
-  }, [currentIndex, queue, schedulePersistence]);
+  }, [
+    currentIndex,
+    isShuffleEnabled,
+    persistImmediately,
+    queue,
+    repeatMode,
+  ]);
 
   const addTracksToQueue = useCallback(
     (tracks: LocalTrack[]) => {
@@ -597,7 +1029,10 @@ export function useLocalAudioPlayer() {
   );
 
   const addFilesToLibrary = useCallback(
-    async (files: AudioFileInput[]) => {
+    async (
+      files: AudioFileInput[],
+      scannedRootUris: string[] = []
+    ): Promise<LibraryScanResult> => {
       const libraryIds = new Set(library.map((item) => item.id));
       const uniqueFiles = files.filter(
         (file, index, allFiles) =>
@@ -608,18 +1043,59 @@ export function useLocalAudioPlayer() {
       const addedCount = scannedTracks.filter(
         (track) => !libraryIds.has(track.id)
       ).length;
+      const scannedById = new Map(
+        scannedTracks.map((track) => [track.id, track])
+      );
+      const normalizedRoots = scannedRootUris.map((uri) =>
+        uri.endsWith('/') ? uri : `${uri}/`
+      );
+      const isInScannedRoot = (track: LocalTrack) =>
+        track.source === 'local' &&
+        normalizedRoots.some(
+          (root) => track.uri === root.slice(0, -1) || track.uri.startsWith(root)
+        );
+      const missingIds = new Set(
+        library
+          .filter(
+            (track) => isInScannedRoot(track) && !scannedById.has(track.id)
+          )
+          .map((track) => track.id)
+      );
 
-      if (scannedTracks.length > 0) {
-        setLibrary((current) => {
-          const merged = new Map(current.map((track) => [track.id, track]));
-          scannedTracks.forEach((track) => merged.set(track.id, track));
-          return [...merged.values()].sort((a, b) =>
-            a.name.localeCompare(b.name)
-          );
-        });
-      }
+      setLibrary((current) => {
+        const merged = new Map(
+          current
+            .filter((track) => !missingIds.has(track.id))
+            .map((track) => [track.id, track])
+        );
+        scannedTracks.forEach((track) => merged.set(track.id, track));
+        return [...merged.values()].sort((a, b) =>
+          a.name.localeCompare(b.name)
+        );
+      });
+      setQueue((current) =>
+        current.map(
+          (track) =>
+            scannedById.get(track.id) ??
+            (missingIds.has(track.id)
+              ? { ...track, isAvailable: false }
+              : track)
+        )
+      );
+      setSavedPlaylists((current) =>
+        current.map((playlist) => ({
+          ...playlist,
+          trackRefs: playlist.trackRefs.map(
+            (track) =>
+              scannedById.get(track.id) ??
+              (missingIds.has(track.id)
+                ? { ...track, isAvailable: false }
+                : track)
+          ),
+        }))
+      );
 
-      return addedCount;
+      return { addedCount, removedCount: missingIds.size };
     },
     [library]
   );
@@ -636,12 +1112,6 @@ export function useLocalAudioPlayer() {
 
   const removeLibraryTrack = useCallback((id: string) => {
     setLibrary((current) => current.filter((item) => item.id !== id));
-    setSavedPlaylists((current) =>
-      current.map((playlist) => ({
-        ...playlist,
-        trackIds: playlist.trackIds.filter((trackId) => trackId !== id),
-      }))
-    );
   }, []);
 
   const updateTrackMetadata = useCallback(
@@ -689,6 +1159,14 @@ export function useLocalAudioPlayer() {
             current.map((item) =>
               item.id === updatedTrack.id ? updatedTrack : item
             )
+          );
+          setSavedPlaylists((current) =>
+            current.map((playlist) => ({
+              ...playlist,
+              trackRefs: playlist.trackRefs.map((item) =>
+                item.id === updatedTrack.id ? updatedTrack : item
+              ),
+            }))
           );
           if (isCurrentTrack) {
             loadTrack(updatedTrack, currentIndex, false);
@@ -773,6 +1251,14 @@ export function useLocalAudioPlayer() {
       setQueue((current) =>
         current.map((item) => (item.uri === uri ? updatedTrack : item))
       );
+      setSavedPlaylists((current) =>
+        current.map((playlist) => ({
+          ...playlist,
+          trackRefs: playlist.trackRefs.map((item) =>
+            item.id === updatedTrack.id ? updatedTrack : item
+          ),
+        }))
+      );
 
       if (isCurrentTrack) {
         player.replace({ uri, name: updatedTrack.name });
@@ -812,6 +1298,7 @@ export function useLocalAudioPlayer() {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         name: trimmedName,
         trackIds: [],
+        trackRefs: [],
       };
       setSavedPlaylists((current) => [...current, playlist]);
       return playlist.id;
@@ -853,16 +1340,24 @@ export function useLocalAudioPlayer() {
 
   const addTrackToSavedPlaylist = useCallback(
     (playlistId: string, trackId: string) => {
+      const trackRef = library.find((item) => item.id === trackId);
+      if (!trackRef) {
+        return;
+      }
       setSavedPlaylists((current) =>
         current.map((playlist) =>
           playlist.id === playlistId &&
           !playlist.trackIds.includes(trackId)
-            ? { ...playlist, trackIds: [...playlist.trackIds, trackId] }
+            ? {
+                ...playlist,
+                trackIds: [...playlist.trackIds, trackId],
+                trackRefs: [...playlist.trackRefs, trackRef],
+              }
             : playlist
         )
       );
     },
-    []
+    [library]
   );
 
   const addTracksToSavedPlaylist = useCallback(
@@ -879,20 +1374,27 @@ export function useLocalAudioPlayer() {
 
           const existingIds = new Set(playlist.trackIds);
           const additions: string[] = [];
+          const addedRefs: LocalTrack[] = [];
           for (const trackId of trackIds) {
-            if (!existingIds.has(trackId)) {
+            const trackRef = library.find((item) => item.id === trackId);
+            if (!existingIds.has(trackId) && trackRef) {
               existingIds.add(trackId);
               additions.push(trackId);
+              addedRefs.push(trackRef);
             }
           }
 
           return additions.length > 0
-            ? { ...playlist, trackIds: [...playlist.trackIds, ...additions] }
+            ? {
+                ...playlist,
+                trackIds: [...playlist.trackIds, ...additions],
+                trackRefs: [...playlist.trackRefs, ...addedRefs],
+              }
             : playlist;
         })
       );
     },
-    []
+    [library]
   );
 
   const removeTrackFromSavedPlaylist = useCallback(
@@ -905,9 +1407,40 @@ export function useLocalAudioPlayer() {
                 trackIds: playlist.trackIds.filter(
                   (candidate) => candidate !== trackId
                 ),
+                trackRefs: playlist.trackRefs.filter(
+                  (candidate) => candidate.id !== trackId
+                ),
               }
             : playlist
         )
+      );
+    },
+    []
+  );
+
+  const moveTrackInSavedPlaylist = useCallback(
+    (playlistId: string, trackId: string, direction: -1 | 1) => {
+      setSavedPlaylists((current) =>
+        current.map((playlist) => {
+          if (playlist.id !== playlistId) {
+            return playlist;
+          }
+          const fromIndex = playlist.trackIds.indexOf(trackId);
+          const toIndex = fromIndex + direction;
+          if (
+            fromIndex < 0 ||
+            toIndex < 0 ||
+            toIndex >= playlist.trackIds.length
+          ) {
+            return playlist;
+          }
+          const trackIds = [...playlist.trackIds];
+          [trackIds[fromIndex], trackIds[toIndex]] = [
+            trackIds[toIndex],
+            trackIds[fromIndex],
+          ];
+          return { ...playlist, trackIds };
+        })
       );
     },
     []
@@ -919,10 +1452,7 @@ export function useLocalAudioPlayer() {
       if (!playlist) {
         return 0;
       }
-      const libraryById = new Map(library.map((item) => [item.id, item]));
-      const tracks = playlist.trackIds
-        .map((id) => libraryById.get(id))
-        .filter((item): item is LocalTrack => Boolean(item));
+      const tracks = resolvePlaylistTracks(playlist, library);
       return addTracksToQueue(tracks);
     },
     [addTracksToQueue, library, savedPlaylists]
@@ -935,19 +1465,17 @@ export function useLocalAudioPlayer() {
         return 0;
       }
 
-      const libraryById = new Map(library.map((item) => [item.id, item]));
-      const tracks = playlist.trackIds
-        .map((id) => libraryById.get(id))
-        .filter((item): item is LocalTrack => Boolean(item));
+      const tracks = resolvePlaylistTracks(playlist, library);
       if (tracks.length === 0) {
         return 0;
       }
 
       setQueue(tracks);
-      loadTrack(tracks[0], 0, true);
+      unavailableTrackIdsRef.current.clear();
+      loadFirstAvailableTrack(tracks, 0, true, false);
       return tracks.length;
     },
-    [library, loadTrack, savedPlaylists]
+    [library, loadFirstAvailableTrack, savedPlaylists]
   );
 
   const pickTracks = useCallback(async () => {
@@ -991,40 +1519,88 @@ export function useLocalAudioPlayer() {
     }
   }, [addFilesToQueue]);
 
-  const mergeRemoteTracks = useCallback(
-    (
-      connection: RemoteConnection,
-      remoteTracks: Awaited<ReturnType<typeof fetchRemoteLibrary>>['tracks']
-    ) => {
-      const mapped: LocalTrack[] = remoteTracks.map((item) => ({
-        album: item.album,
-        albumArtist: item.albumArtist,
-        artist: item.artist,
-        artwork: item.hasArtwork
-          ? remoteArtworkUrl(connection, item.id)
-          : undefined,
-        extension: item.extension,
-        genre: item.genre,
-        id: `remote:${connection.serverId}:${item.id}`,
-        name: item.name,
-        remoteId: item.id,
-        source: 'remote',
-        track: item.track,
-        uri: `remote://${connection.serverId}/${item.id}`,
-        year: item.year,
-      }));
-      const byId = new Map(mapped.map((item) => [item.id, item]));
-      setLibrary((current) =>
-        [...current.filter((item) => item.source === 'local'), ...mapped].sort(
-          (left, right) => left.name.localeCompare(right.name)
-        )
+  const updateRemoteRefs = useCallback(
+    (resolve: (item: LocalTrack) => LocalTrack) => {
+      const update = (item: LocalTrack) =>
+        item.source === 'remote' ? resolve(item) : item;
+      setQueue((current) => current.map(update));
+      setSavedPlaylists((current) =>
+        current.map((playlist) => ({
+          ...playlist,
+          trackRefs: playlist.trackRefs.map(update),
+        }))
       );
-      setQueue((current) =>
-        current.map((item) =>
-          item.source === 'remote' ? (byId.get(item.id) ?? item) : item
-        )
+    },
+    []
+  );
+
+  const mergeRemoteTracks = useCallback(
+    (connection: RemoteConnection, remoteTracks: RemoteTrackDto[]) => {
+      const mapped = remoteTracks.map((item) => mapRemoteTrack(connection, item));
+      const byId = new Map(mapped.map((item) => [item.id, item]));
+      const nextLibrary = sortLibrary([
+        ...libraryRef.current.filter((item) => item.source === 'local'),
+        ...mapped,
+      ]);
+      libraryRef.current = nextLibrary;
+      setLibrary(nextLibrary);
+      updateRemoteRefs(
+        (item) => byId.get(item.id) ?? { ...item, isAvailable: false }
       );
       return mapped.length;
+    },
+    [updateRemoteRefs]
+  );
+
+  const applyRemoteDelta = useCallback(
+    (connection: RemoteConnection, upserts: RemoteTrackDto[], deletes: string[]) => {
+      const mapped = upserts.map((item) => mapRemoteTrack(connection, item));
+      const upsertById = new Map(mapped.map((item) => [item.id, item]));
+      const deletedIds = new Set(
+        deletes.map((id) => `remote:${connection.serverId}:${id}`)
+      );
+      const nextLibrary =
+        mapped.length === 0 && deletedIds.size === 0
+          ? libraryRef.current
+          : sortLibrary([
+              ...libraryRef.current.filter(
+                (item) => !deletedIds.has(item.id) && !upsertById.has(item.id)
+              ),
+              ...mapped,
+            ]);
+      if (nextLibrary !== libraryRef.current) {
+        libraryRef.current = nextLibrary;
+        setLibrary(nextLibrary);
+        updateRemoteRefs(
+          (item) =>
+            upsertById.get(item.id) ??
+            (deletedIds.has(item.id) ? { ...item, isAvailable: false } : item)
+        );
+      }
+      return nextLibrary.filter((item) => item.source === 'remote').length;
+    },
+    [updateRemoteRefs]
+  );
+
+  const applyRemoteSync = useCallback(
+    (synced: RemoteLibrarySync) => {
+      remoteConnectionRef.current = synced.connection;
+      setRemoteConnection(synced.connection);
+      return synced.mode === 'full'
+        ? mergeRemoteTracks(synced.connection, synced.tracks)
+        : applyRemoteDelta(synced.connection, synced.upserts, synced.deletes);
+    },
+    [applyRemoteDelta, mergeRemoteTracks]
+  );
+
+  const runRemoteSync = useCallback(
+    (connection: RemoteConnection, token: string) => {
+      const hasRemoteTracks = libraryRef.current.some(
+        (item) =>
+          item.source === 'remote' &&
+          item.id.startsWith(`remote:${connection.serverId}:`)
+      );
+      return syncRemoteLibrary(connection, token, { forceFull: !hasRemoteTracks });
     },
     []
   );
@@ -1035,17 +1611,15 @@ export function useLocalAudioPlayer() {
       setRemoteError(null);
       try {
         const paired = await pairRemoteServer(baseUrl, code);
+        hasAutoSyncedRemote.current = true;
         remoteConnectionRef.current = paired.connection;
         remoteTokenRef.current = paired.token;
         setRemoteConnection(paired.connection);
         setRemoteToken(paired.token);
-        const synced = await fetchRemoteLibrary(
-          paired.connection,
-          paired.token
-        );
-        remoteConnectionRef.current = synced.connection;
-        setRemoteConnection(synced.connection);
-        const count = mergeRemoteTracks(synced.connection, synced.tracks);
+        const synced = await syncRemoteLibrary(paired.connection, paired.token, {
+          forceFull: true,
+        });
+        const count = applyRemoteSync(synced);
         setRemoteStatus('connected');
         return count;
       } catch (error) {
@@ -1056,7 +1630,7 @@ export function useLocalAudioPlayer() {
         throw error;
       }
     },
-    [mergeRemoteTracks]
+    [applyRemoteSync]
   );
 
   const syncRemote = useCallback(async () => {
@@ -1068,10 +1642,7 @@ export function useLocalAudioPlayer() {
     setRemoteStatus('syncing');
     setRemoteError(null);
     try {
-      const synced = await fetchRemoteLibrary(connection, token);
-      remoteConnectionRef.current = synced.connection;
-      setRemoteConnection(synced.connection);
-      const count = mergeRemoteTracks(synced.connection, synced.tracks);
+      const count = applyRemoteSync(await runRemoteSync(connection, token));
       setRemoteStatus('connected');
       return count;
     } catch (error) {
@@ -1081,7 +1652,50 @@ export function useLocalAudioPlayer() {
       setRemoteStatus('error');
       throw error;
     }
-  }, [mergeRemoteTracks]);
+  }, [applyRemoteSync, runRemoteSync]);
+
+  useEffect(() => {
+    if (
+      hasAutoSyncedRemote.current ||
+      !remoteConnection ||
+      !remoteToken
+    ) {
+      return;
+    }
+    hasAutoSyncedRemote.current = true;
+    void syncRemote().catch(() => {
+      // Keep the last synced library and expose the connection error in the UI.
+    });
+  }, [remoteConnection, remoteToken, syncRemote]);
+
+  useEffect(() => {
+    let isSyncing = false;
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      const connection = remoteConnectionRef.current;
+      if (
+        nextState !== 'active' ||
+        isSyncing ||
+        !connection ||
+        !remoteTokenRef.current ||
+        !hasAutoSyncedRemote.current
+      ) {
+        return;
+      }
+      const lastSyncAt = connection.lastSyncAt ? Date.parse(connection.lastSyncAt) : 0;
+      if (Date.now() - lastSyncAt < FOREGROUND_SYNC_INTERVAL_MS) {
+        return;
+      }
+      isSyncing = true;
+      void syncRemote()
+        .catch(() => {
+          // The header shows the error and a retry control.
+        })
+        .finally(() => {
+          isSyncing = false;
+        });
+    });
+    return () => subscription.remove();
+  }, [syncRemote]);
 
   const checkRemoteConnection = useCallback(async () => {
     const connection = remoteConnectionRef.current;
@@ -1114,10 +1728,7 @@ export function useLocalAudioPlayer() {
       setRemoteError(null);
       try {
         await updateRemoteLibraryRoots(connection, token, paths);
-        const synced = await fetchRemoteLibrary(connection, token);
-        remoteConnectionRef.current = synced.connection;
-        setRemoteConnection(synced.connection);
-        const count = mergeRemoteTracks(synced.connection, synced.tracks);
+        const count = applyRemoteSync(await runRemoteSync(connection, token));
         setRemoteStatus('connected');
         return count;
       } catch (error) {
@@ -1130,7 +1741,7 @@ export function useLocalAudioPlayer() {
         throw error;
       }
     },
-    [mergeRemoteTracks]
+    [applyRemoteSync, runRemoteSync]
   );
 
   const removeRemoteConnection = useCallback(async (localOnly = false) => {
@@ -1145,32 +1756,21 @@ export function useLocalAudioPlayer() {
     setRemoteToken(null);
     setRemoteStatus('disconnected');
     setRemoteError(null);
-    const remoteIds = new Set(
-      library.filter((item) => item.source === 'remote').map((item) => item.id)
-    );
     setLibrary((current) => current.filter((item) => item.source === 'local'));
-    setQueue((current) => current.filter((item) => item.source === 'local'));
-    setSavedPlaylists((current) =>
-      current.map((playlist) => ({
-        ...playlist,
-        trackIds: playlist.trackIds.filter((id) => !remoteIds.has(id)),
-      }))
-    );
     if (track?.source === 'remote') {
+      setPlaybackIntent(false);
+      nativeWasPlayingRef.current = false;
       player.pause();
       player.replace(null);
-      setCurrentIndex(-1);
     }
-  }, [library, player, track]);
+  }, [player, setPlaybackIntent, track]);
 
   const playTrack = useCallback(
     (index: number) => {
-      const selectedTrack = queue[index];
-      if (selectedTrack) {
-        loadTrack(selectedTrack, index, true);
-      }
+      unavailableTrackIdsRef.current.clear();
+      loadFirstAvailableTrack(queue, index, true, false);
     },
-    [loadTrack, queue]
+    [loadFirstAvailableTrack, queue]
   );
 
   const removeTrack = useCallback(
@@ -1183,6 +1783,8 @@ export function useLocalAudioPlayer() {
       setQueue(nextQueue);
 
       if (nextQueue.length === 0) {
+        setPlaybackIntent(false);
+        nativeWasPlayingRef.current = false;
         player.pause();
         player.replace(null);
         setCurrentIndex(-1);
@@ -1199,15 +1801,50 @@ export function useLocalAudioPlayer() {
         loadTrack(nextQueue[replacementIndex], replacementIndex, status.playing);
       }
     },
-    [currentIndex, loadTrack, player, queue, status.playing]
+    [
+      currentIndex,
+      loadTrack,
+      player,
+      queue,
+      setPlaybackIntent,
+      status.playing,
+    ]
+  );
+
+  const moveQueueTrack = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      if (
+        fromIndex === toIndex ||
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        fromIndex >= queue.length ||
+        toIndex >= queue.length
+      ) {
+        return;
+      }
+      const nextQueue = [...queue];
+      [nextQueue[fromIndex], nextQueue[toIndex]] = [
+        nextQueue[toIndex],
+        nextQueue[fromIndex],
+      ];
+      setQueue(nextQueue);
+      setCurrentIndex((current) => {
+        if (current === fromIndex) return toIndex;
+        if (current === toIndex) return fromIndex;
+        return current;
+      });
+    },
+    [queue]
   );
 
   const clearQueue = useCallback(() => {
+    setPlaybackIntent(false);
+    nativeWasPlayingRef.current = false;
     player.pause();
     player.replace(null);
     setQueue([]);
     setCurrentIndex(-1);
-  }, [player]);
+  }, [player, setPlaybackIntent]);
 
   const advanceTrack = useCallback(
     (fromCompletion: boolean) => {
@@ -1216,42 +1853,57 @@ export function useLocalAudioPlayer() {
       }
 
       if (fromCompletion && repeatMode === 'one') {
+        setPlaybackIntent(true);
         player.seekTo(0).then(() => player.play());
         return;
       }
 
+      if (fromCompletion) {
+        unavailableTrackIdsRef.current.clear();
+      }
+
       if (isShuffleEnabled && queue.length > 1) {
-        let nextIndex = Math.floor(Math.random() * (queue.length - 1));
-        if (nextIndex >= currentIndex) {
-          nextIndex += 1;
+        const candidates = queue
+          .map((candidate, index) => ({ candidate, index }))
+          .filter(
+            ({ candidate, index }) =>
+              index !== currentIndex &&
+              !unavailableTrackIdsRef.current.has(candidate.id) &&
+              isTrackSourceAvailable(candidate)
+          );
+        const selected =
+          candidates[Math.floor(Math.random() * candidates.length)];
+        if (selected) {
+          loadTrack(selected.candidate, selected.index, true);
         }
-        loadTrack(queue[nextIndex], nextIndex, true);
         return;
       }
 
       const nextIndex = currentIndex + 1;
-      const next = queue[nextIndex];
-      if (next) {
-        loadTrack(next, nextIndex, true);
-        return;
-      }
-
-      if (repeatMode === 'all' && queue.length > 0) {
-        loadTrack(queue[0], 0, true);
-      }
+      loadFirstAvailableTrack(
+        queue,
+        nextIndex,
+        true,
+        repeatMode === 'all',
+        unavailableTrackIdsRef.current
+      );
     },
     [
       currentIndex,
       isShuffleEnabled,
+      isTrackSourceAvailable,
+      loadFirstAvailableTrack,
       loadTrack,
       player,
       queue,
       repeatMode,
+      setPlaybackIntent,
       track,
     ]
   );
 
   const nextTrack = useCallback(() => {
+    unavailableTrackIdsRef.current.clear();
     advanceTrack(false);
   }, [advanceTrack]);
 
@@ -1306,12 +1958,157 @@ export function useLocalAudioPlayer() {
     }
   }, [advanceTrack, status.didJustFinish, track]);
 
+  useEffect(() => {
+    if (
+      !track ||
+      !isPlaybackRequested ||
+      status.didJustFinish ||
+      hasHandledFinish.current ||
+      !Number.isFinite(status.duration) ||
+      status.duration <= 0 ||
+      status.currentTime < status.duration - NEAR_GAPLESS_HANDOFF_SECONDS
+    ) {
+      return;
+    }
+    hasHandledFinish.current = true;
+    advanceTrack(true);
+  }, [
+    advanceTrack,
+    isPlaybackRequested,
+    status.currentTime,
+    status.didJustFinish,
+    status.duration,
+    track,
+  ]);
+
+  useEffect(() => {
+    if (!track || !isPlaybackRequested) {
+      releasePreloadedSource();
+      return;
+    }
+    const next = peekNextPlayableTrack(true);
+    if (!next || next.candidate.id === track.id) {
+      releasePreloadedSource();
+      return;
+    }
+
+    const source = getPlayableSource(next.candidate);
+    if (!source || source.uri.startsWith('http')) {
+      releasePreloadedSource();
+      return;
+    }
+
+    if (preloadedSourceRef.current?.id === next.candidate.id) {
+      return;
+    }
+    releasePreloadedSource();
+
+    let cancelled = false;
+    try {
+      const file = new File(source.uri);
+      if (!file.exists || (file.size ?? 0) > PRELOAD_MAX_BYTES) {
+        return;
+      }
+    } catch {
+      return;
+    }
+
+    preloadedSourceRef.current = { id: next.candidate.id, uri: source.uri };
+    void preload(source)
+      .then(() => {
+        if (cancelled) {
+          void clearPreloadedSource({ uri: source.uri }).catch(() => undefined);
+        }
+      })
+      .catch(() => {
+        if (preloadedSourceRef.current?.id === next.candidate.id) {
+          preloadedSourceRef.current = null;
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    cacheRevision,
+    getPlayableSource,
+    isPlaybackRequested,
+    peekNextPlayableTrack,
+    releasePreloadedSource,
+    track,
+  ]);
+
+  useEffect(() => {
+    if (!status.error || !track) {
+      playbackErrorTrackIdRef.current = null;
+      return;
+    }
+    if (playbackErrorTrackIdRef.current !== null) {
+      return;
+    }
+
+    playbackErrorTrackIdRef.current = track.id;
+    if (
+      track.source === 'remote' &&
+      recoveredTrackIdRef.current !== track.id &&
+      getCachedTrackUri(track)
+    ) {
+      const resumePosition = player.currentTime;
+      recoveredTrackIdRef.current = track.id;
+      if (loadTrack(track, currentIndex, true) && resumePosition > 0) {
+        void player.seekTo(resumePosition).catch(() => undefined);
+      }
+      return;
+    }
+    unavailableTrackIdsRef.current.add(track.id);
+    loadFirstAvailableTrack(
+      queue,
+      currentIndex + 1,
+      true,
+      repeatMode === 'all',
+      unavailableTrackIdsRef.current
+    );
+  }, [
+    currentIndex,
+    loadFirstAvailableTrack,
+    loadTrack,
+    player,
+    queue,
+    repeatMode,
+    status.error,
+    track,
+  ]);
+
+  useEffect(() => {
+    if (
+      !track ||
+      track.source !== 'remote' ||
+      !isPlaybackRequested ||
+      !status.isBuffering
+    ) {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      if (streamingTrackIdRef.current !== track.id || !getCachedTrackUri(track)) {
+        return;
+      }
+      const resumePosition = player.currentTime;
+      if (loadTrack(track, currentIndex, true) && resumePosition > 0) {
+        void player.seekTo(resumePosition).catch(() => undefined);
+      }
+    }, STREAM_STALL_FALLBACK_MS);
+    return () => clearTimeout(timeout);
+  }, [currentIndex, isPlaybackRequested, loadTrack, player, status.isBuffering, track]);
+
   const togglePlayback = useCallback(async () => {
     if (!track) {
       return;
     }
 
-    if (status.playing) {
+    if (status.playing || playbackRequestedRef.current) {
+      setPlaybackIntent(false);
+      nativeWasPlayingRef.current = false;
       player.pause();
       return;
     }
@@ -1319,8 +2116,91 @@ export function useLocalAudioPlayer() {
     if (status.didJustFinish || status.currentTime >= status.duration) {
       await player.seekTo(0);
     }
+    unavailableTrackIdsRef.current.clear();
+    if (!isTrackSourceAvailable(track)) {
+      loadFirstAvailableTrack(queue, currentIndex, true, false);
+      return;
+    }
+    setPlaybackIntent(true);
     player.play();
-  }, [player, status, track]);
+  }, [
+    currentIndex,
+    isTrackSourceAvailable,
+    loadFirstAvailableTrack,
+    player,
+    queue,
+    setPlaybackIntent,
+    status,
+    track,
+  ]);
+
+  useEffect(() => {
+    remoteCommandHandlersRef.current = {
+      next: nextTrack,
+      previous: () => {
+        void previousTrack();
+      },
+      resume: () => {
+        if (!playbackRequestedRef.current) {
+          void togglePlayback();
+        }
+      },
+    };
+  }, [nextTrack, previousTrack, togglePlayback]);
+
+  useEffect(() => {
+    const emitter = player as unknown as {
+      addListener: (
+        eventName: 'remoteCommand',
+        listener: (event: { command?: string }) => void
+      ) => { remove: () => void };
+    };
+    const subscription = emitter.addListener('remoteCommand', ({ command }) => {
+      if (command === 'next') {
+        remoteCommandHandlersRef.current.next();
+      } else if (command === 'previous') {
+        remoteCommandHandlersRef.current.previous();
+      }
+    });
+    return () => subscription.remove();
+  }, [player]);
+
+  useEffect(() => {
+    let resumeTimer: ReturnType<typeof setTimeout> | null = null;
+    const noisy = addAudioRouteListener('becomingNoisy', () => {
+      if (
+        !headsetOptionsRef.current.pauseOnHeadphoneDisconnect ||
+        !playbackRequestedRef.current
+      ) {
+        return;
+      }
+      setPlaybackIntent(false);
+      nativeWasPlayingRef.current = false;
+      player.pause();
+      autoPausedAtRef.current = Date.now();
+    });
+    const connected = addAudioRouteListener('outputConnected', () => {
+      const autoPausedAt = autoPausedAtRef.current;
+      if (
+        autoPausedAt === null ||
+        !headsetOptionsRef.current.resumeOnHeadphoneReconnect ||
+        Date.now() - autoPausedAt > AUTO_RESUME_WINDOW_MS
+      ) {
+        return;
+      }
+      autoPausedAtRef.current = null;
+      if (resumeTimer) clearTimeout(resumeTimer);
+      resumeTimer = setTimeout(
+        () => remoteCommandHandlersRef.current.resume(),
+        AUTO_RESUME_DELAY_MS
+      );
+    });
+    return () => {
+      noisy.remove();
+      connected.remove();
+      if (resumeTimer) clearTimeout(resumeTimer);
+    };
+  }, [player, setPlaybackIntent]);
 
   const seekTo = useCallback(
     async (seconds: number) => {
@@ -1350,7 +2230,7 @@ export function useLocalAudioPlayer() {
       currentIndex,
       canGoNext,
       isPicking,
-      isPlaying: status.playing,
+      isPlaying: isPlaybackRequested,
       isBuffering: status.isBuffering,
       isLoaded: status.isLoaded,
       isShuffleEnabled,
@@ -1370,6 +2250,7 @@ export function useLocalAudioPlayer() {
       addTrackToSavedPlaylist,
       addTracksToSavedPlaylist,
       removeTrackFromSavedPlaylist,
+      moveTrackInSavedPlaylist,
       addSavedPlaylistToQueue,
       playSavedPlaylist,
       connectRemote,
@@ -1381,6 +2262,7 @@ export function useLocalAudioPlayer() {
       pickTracks,
       playTrack,
       removeTrack,
+      moveQueueTrack,
       clearQueue,
       previousTrack,
       nextTrack,
@@ -1409,6 +2291,7 @@ export function useLocalAudioPlayer() {
       clearQueue,
       deleteSavedPlaylist,
       isPicking,
+      isPlaybackRequested,
       isShuffleEnabled,
       library,
       nextTrack,
@@ -1416,6 +2299,7 @@ export function useLocalAudioPlayer() {
       playTrack,
       playSavedPlaylist,
       removeTrack,
+      moveQueueTrack,
       previousTrack,
       queue,
       repeatMode,
@@ -1427,6 +2311,7 @@ export function useLocalAudioPlayer() {
       remoteToken,
       updateTrackMetadata,
       removeTrackFromSavedPlaylist,
+      moveTrackInSavedPlaylist,
       savedPlaylists,
       saveRemoteDirectories,
       syncRemote,
@@ -1434,7 +2319,6 @@ export function useLocalAudioPlayer() {
       status.error,
       status.isBuffering,
       status.isLoaded,
-      status.playing,
       togglePlayback,
       toggleShuffle,
       cycleRepeatMode,

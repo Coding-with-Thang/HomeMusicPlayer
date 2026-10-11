@@ -39,3 +39,22 @@ Docs: https://docs.expo.dev/eas/index.md
 - If `ios/` and `android/` directories do not exist, they are generated (Continuous Native Generation). Never create or edit them by hand — configure native behavior in `app.json` and config plugins.
 - Expo Go only includes its bundled native modules. After adding a library with native code, the app needs a development build: `npx expo run:ios|android` locally, or `eas build --profile development`.
 - Prefer recommended Expo modules over third-party libraries, and check your available skills before adding dependencies. Docs: https://docs.expo.dev/versions/latest/index.md
+
+## Gapless playback and Expo playlist API
+
+Do **not** migrate queue playback to `useAudioPlaylist` / `AudioPlaylist` until the checklist below passes on the current Expo SDK. On SDK 57.0.5 the playlist API drops per-source `headers`, has no lock-screen / media-session support, and cannot move or replace the current item.
+
+Until then, keep the current single-track `AudioPlayer` and the near-gapless handoff in `useLocalAudioPlayer.ts` (early switch near track end plus `preload()` of the next local or cached file).
+
+If true gapless is needed before Expo closes those gaps, prefer a custom Media3 player module (option D) over a large `expo-audio` playlist patch (option B). A custom module can keep authenticated remote sources, lock-screen controls, and headset next/previous in one place.
+
+### Playlist-API compatibility checklist
+
+Re-run after every Expo / `expo-audio` upgrade. Migrate only if every item passes:
+
+- Playlist items send `headers`. A queue of 3 PC tracks (bearer auth) all play, and the next track starts with no 401.
+- Mixed queue (device file, PC, device file) transitions on a gapless test album (a sine sweep split across tracks) with no extra silence.
+- `setActiveForLockScreen` or an equivalent works on a playlist: lock screen, notification, Bluetooth metadata, and headset next/previous all work during playlist playback.
+- Items can be moved or replaced in place. Shuffle, repeat one/all, reordering the queue, and removing the current track while playing all keep the playing item intact.
+- Turning the PC off mid-queue: cached tracks keep playing and uncached ones are skipped.
+- Background playback continues for 30+ minutes with the screen off.

@@ -8,7 +8,18 @@ export type RemoteConnection = {
   baseUrl: string;
   lastSyncAt?: string;
   serverId: string;
+  syncEpoch?: string;
+  syncRevision?: number;
 };
+
+export type RemoteLibrarySync =
+  | { connection: RemoteConnection; mode: "full"; tracks: RemoteTrackDto[] }
+  | {
+      connection: RemoteConnection;
+      deletes: string[];
+      mode: "delta";
+      upserts: RemoteTrackDto[];
+    };
 
 export type RemoteTrackDto = {
   album?: string;
@@ -38,6 +49,15 @@ export type RemoteEditableMetadata = {
   name: string;
   track?: number;
   year?: number;
+};
+
+type RemoteChangesPage = {
+  deletes: string[];
+  nextSince: number | null;
+  resetRequired: boolean;
+  revision: number;
+  serverId: string;
+  upserts: RemoteTrackDto[];
 };
 
 type HealthResponse = {
@@ -142,10 +162,14 @@ export async function fetchRemoteLibrary(
 ) {
   const tracks: RemoteTrackDto[] = [];
   let offset: number | null = 0;
+  let syncEpoch: string | undefined;
+  let syncRevision: number | undefined;
   while (offset !== null) {
     const page: {
+      epoch?: string;
       items: RemoteTrackDto[];
       nextOffset: number | null;
+      revision?: number;
       serverId: string;
     } = await readJson(
       await fetch(
@@ -156,12 +180,78 @@ export async function fetchRemoteLibrary(
     if (page.serverId !== connection.serverId) {
       throw new Error("The connected companion identity no longer matches.");
     }
+    if (offset === 0) {
+      syncEpoch = page.epoch;
+      syncRevision = page.revision;
+    }
     tracks.push(...page.items);
     offset = page.nextOffset;
   }
-  const updated = { ...connection, lastSyncAt: new Date().toISOString() };
+  const updated: RemoteConnection = {
+    baseUrl: connection.baseUrl,
+    lastSyncAt: new Date().toISOString(),
+    serverId: connection.serverId,
+    ...(typeof syncEpoch === "string" && typeof syncRevision === "number"
+      ? { syncEpoch, syncRevision }
+      : {}),
+  };
   await AsyncStorage.setItem(CONNECTION_KEY, JSON.stringify(updated));
   return { connection: updated, tracks };
+}
+
+async function fetchRemoteChanges(
+  connection: RemoteConnection,
+  token: string,
+): Promise<RemoteLibrarySync | null> {
+  const { syncEpoch, syncRevision } = connection;
+  if (typeof syncEpoch !== "string" || typeof syncRevision !== "number") {
+    return null;
+  }
+
+  const changes = new Map<string, RemoteTrackDto | null>();
+  let since: number | null = syncRevision;
+  let revision = syncRevision;
+  while (since !== null) {
+    const response: Response = await fetch(
+      `${connection.baseUrl}/api/v1/library/changes?since=${since}&epoch=${encodeURIComponent(syncEpoch)}&limit=500`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (response.status === 404) return null;
+    const page: RemoteChangesPage = await readJson<RemoteChangesPage>(response);
+    if (page.serverId !== connection.serverId) {
+      throw new Error("The connected companion identity no longer matches.");
+    }
+    if (page.resetRequired) return null;
+    for (const item of page.upserts) changes.set(item.id, item);
+    for (const id of page.deletes) changes.set(id, null);
+    revision = page.revision;
+    since = page.nextSince;
+  }
+
+  const updated: RemoteConnection = {
+    ...connection,
+    lastSyncAt: new Date().toISOString(),
+    syncRevision: revision,
+  };
+  await AsyncStorage.setItem(CONNECTION_KEY, JSON.stringify(updated));
+  const upserts: RemoteTrackDto[] = [];
+  const deletes: string[] = [];
+  for (const [id, item] of changes) {
+    if (item) upserts.push(item);
+    else deletes.push(id);
+  }
+  return { connection: updated, deletes, mode: "delta", upserts };
+}
+
+export async function syncRemoteLibrary(
+  connection: RemoteConnection,
+  token: string,
+  options: { forceFull?: boolean } = {},
+): Promise<RemoteLibrarySync> {
+  const delta = options.forceFull ? null : await fetchRemoteChanges(connection, token);
+  if (delta) return delta;
+  const full = await fetchRemoteLibrary(connection, token);
+  return { ...full, mode: "full" };
 }
 
 export async function fetchRemoteDirectories(

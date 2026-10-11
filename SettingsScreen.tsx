@@ -41,6 +41,11 @@ type SettingsScreenProps = {
   onOpenPcConnectionGuide: () => void;
   onPlayerPositionChange: (position: PlaylistPlayerPosition) => void;
   onShowFileTypeChange: (enabled: boolean) => void;
+  onPauseOnHeadphoneDisconnectChange: (enabled: boolean) => void;
+  onResumeOnHeadphoneReconnectChange: (enabled: boolean) => void;
+  pauseOnHeadphoneDisconnect: boolean;
+  resumeOnHeadphoneReconnect: boolean;
+  onVisualizationBackgroundColorChange: (color: string) => void;
   onVisualizationBackgroundImageChoose: () => void;
   onVisualizationBackgroundImageRemove: () => void;
   onVisualizationEffectChange: (effect: VisualizationEffect) => void;
@@ -52,6 +57,7 @@ type SettingsScreenProps = {
   remoteError: string | null;
   remoteStatus: "disconnected" | "connecting" | "connected" | "syncing" | "error";
   showFileType: boolean;
+  visualizationBackgroundColor: string;
   visualizationBackgroundImage: string | null;
   visualizationEffect: VisualizationEffect;
   visualizationEnabled: boolean;
@@ -118,6 +124,11 @@ export function SettingsScreen({
   onOpenPcConnectionGuide,
   onPlayerPositionChange,
   onShowFileTypeChange,
+  onPauseOnHeadphoneDisconnectChange,
+  onResumeOnHeadphoneReconnectChange,
+  pauseOnHeadphoneDisconnect,
+  resumeOnHeadphoneReconnect,
+  onVisualizationBackgroundColorChange,
   onVisualizationBackgroundImageChoose,
   onVisualizationBackgroundImageRemove,
   onVisualizationEffectChange,
@@ -129,6 +140,7 @@ export function SettingsScreen({
   remoteError,
   remoteStatus,
   showFileType,
+  visualizationBackgroundColor,
   visualizationBackgroundImage,
   visualizationEffect,
   visualizationEnabled,
@@ -530,7 +542,9 @@ export function SettingsScreen({
                   {isRemoteBusy ? (
                     <ActivityIndicator color="#fff" />
                   ) : (
-                    <Text style={styles.remotePrimaryText}>Sync library</Text>
+                    <Text style={styles.remotePrimaryText}>
+                      {remoteStatus === "error" ? "Retry sync" : "Sync library"}
+                    </Text>
                   )}
                 </Pressable>
                 <Pressable
@@ -558,7 +572,7 @@ export function SettingsScreen({
                   onPress={() =>
                     Alert.alert(
                       "Disconnect PC?",
-                      "Remote tracks will be removed from this device and its playlists.",
+                      "The synced PC library will be removed, but playlist references will be kept for reconnection.",
                       [
                         { text: "Cancel", style: "cancel" },
                         {
@@ -632,6 +646,67 @@ export function SettingsScreen({
               trackColor={{ false: colors.border, true: colors.switchTrack }}
               thumbColor={showFileType ? colors.accent : "#fff"}
               value={showFileType}
+            />
+          </View>
+        </AccordionSection>
+
+        <AccordionSection
+          description="Disconnects and reconnects"
+          icon="headset-outline"
+          title="Headphones and Bluetooth"
+        >
+          <Text style={styles.eyebrow}>HEADPHONES</Text>
+          <Text style={styles.sectionTitle}>Audio devices</Text>
+          <Text style={styles.subtitle}>
+            Headset and car buttons can play, pause, and skip songs. Choose what
+            happens when headphones or Bluetooth audio disconnect.
+          </Text>
+
+          <View style={styles.toggleCard}>
+            <View style={styles.optionIcon}>
+              <Ionicons name="pause-circle-outline" color={colors.accent} size={21} />
+            </View>
+            <View style={styles.optionText}>
+              <Text style={styles.optionLabel}>Pause when disconnected</Text>
+              <Text style={styles.optionDescription}>
+                {pauseOnHeadphoneDisconnect
+                  ? "Music stops instead of playing from the speaker"
+                  : "Music keeps playing from the phone speaker"}
+              </Text>
+            </View>
+            <Switch
+              accessibilityLabel="Pause when headphones disconnect"
+              accessibilityState={{ checked: pauseOnHeadphoneDisconnect }}
+              onValueChange={onPauseOnHeadphoneDisconnectChange}
+              trackColor={{ false: colors.border, true: colors.switchTrack }}
+              thumbColor={pauseOnHeadphoneDisconnect ? colors.accent : "#fff"}
+              value={pauseOnHeadphoneDisconnect}
+            />
+          </View>
+
+          <View style={styles.toggleCard}>
+            <View style={styles.optionIcon}>
+              <Ionicons name="bluetooth-outline" color={colors.accent} size={21} />
+            </View>
+            <View style={styles.optionText}>
+              <Text style={styles.optionLabel}>Resume when reconnected</Text>
+              <Text style={styles.optionDescription}>
+                {pauseOnHeadphoneDisconnect
+                  ? "Continues if headphones reconnect within 10 minutes"
+                  : "Requires pause when disconnected"}
+              </Text>
+            </View>
+            <Switch
+              accessibilityLabel="Resume when headphones reconnect"
+              accessibilityState={{
+                checked: resumeOnHeadphoneReconnect,
+                disabled: !pauseOnHeadphoneDisconnect,
+              }}
+              disabled={!pauseOnHeadphoneDisconnect}
+              onValueChange={onResumeOnHeadphoneReconnectChange}
+              trackColor={{ false: colors.border, true: colors.switchTrack }}
+              thumbColor={resumeOnHeadphoneReconnect ? colors.accent : "#fff"}
+              value={resumeOnHeadphoneReconnect}
             />
           </View>
         </AccordionSection>
@@ -765,6 +840,25 @@ export function SettingsScreen({
               );
             })}
           </View>
+
+          <Text style={styles.controlLabel}>BACKGROUND COLOR</Text>
+          <View style={styles.colorOptions}>
+            {visualizationColors.map((color) => (
+              <ColorOption
+                color={color}
+                isSelected={visualizationBackgroundColor === color}
+                key={`background-${color}`}
+                label="background"
+                onPress={() => onVisualizationBackgroundColorChange(color)}
+              />
+            ))}
+          </View>
+          <CustomColorField
+            color={visualizationBackgroundColor}
+            key={`custom-background-${visualizationBackgroundColor}`}
+            label="visualization background"
+            onApply={onVisualizationBackgroundColorChange}
+          />
 
           <Text style={styles.controlLabel}>BACKGROUND IMAGE</Text>
           <View style={styles.backgroundCard}>

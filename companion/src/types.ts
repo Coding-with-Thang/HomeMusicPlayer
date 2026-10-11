@@ -35,20 +35,31 @@ export type IndexedTrack = {
   album?: string;
   albumArtist?: string;
   artist: string;
-  artwork?: {
-    data: Uint8Array;
-    mimeType: string;
-  };
   extension: string;
   filePath: string;
   genre?: string;
+  hasArtwork: boolean;
   id: string;
+  mtimeMs: number;
   name: string;
+  revision: number;
   size: number;
   track?: number;
   year?: number;
 };
 
-export type PublicTrack = Omit<IndexedTrack, "artwork" | "filePath"> & {
-  hasArtwork: boolean;
+export type PublicTrack = Omit<IndexedTrack, "filePath" | "mtimeMs">;
+
+export type TrackArtwork = {
+  data: Uint8Array;
+  mimeType: string;
+};
+
+export type LibraryChanges = {
+  deletes: string[];
+  epoch: string;
+  nextSince: number | null;
+  resetRequired: boolean;
+  revision: number;
+  upserts: PublicTrack[];
 };

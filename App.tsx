@@ -50,8 +50,14 @@ const VISUALIZATION_PRIMARY_COLOR_STORAGE_KEY =
   "home-audio-player.visualization-primary-color.v1";
 const VISUALIZATION_SECONDARY_COLOR_STORAGE_KEY =
   "home-audio-player.visualization-secondary-color.v1";
+const VISUALIZATION_BACKGROUND_COLOR_STORAGE_KEY =
+  "home-audio-player.visualization-background-color.v1";
 const VISUALIZATION_BACKGROUND_STORAGE_KEY =
   "home-audio-player.visualization-background.v1";
+const PAUSE_ON_HEADPHONE_DISCONNECT_STORAGE_KEY =
+  "home-audio-player.pause-on-headphone-disconnect.v1";
+const RESUME_ON_HEADPHONE_RECONNECT_STORAGE_KEY =
+  "home-audio-player.resume-on-headphone-reconnect.v1";
 
 function formatTime(value: number) {
   if (!Number.isFinite(value) || value < 0) {
@@ -76,6 +82,10 @@ export default function App() {
 function AppContent() {
   const { colors, mode } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const [pauseOnHeadphoneDisconnect, setPauseOnHeadphoneDisconnect] =
+    useState(true);
+  const [resumeOnHeadphoneReconnect, setResumeOnHeadphoneReconnect] =
+    useState(false);
   const {
     track,
     queue,
@@ -105,6 +115,7 @@ function AppContent() {
     addTrackToSavedPlaylist,
     addTracksToSavedPlaylist,
     removeTrackFromSavedPlaylist,
+    moveTrackInSavedPlaylist,
     addSavedPlaylistToQueue,
     playSavedPlaylist,
     connectRemote,
@@ -115,6 +126,7 @@ function AppContent() {
     removeRemoteConnection,
     playTrack,
     removeTrack,
+    moveQueueTrack,
     clearQueue,
     previousTrack,
     nextTrack,
@@ -122,18 +134,23 @@ function AppContent() {
     cycleRepeatMode,
     seekTo,
     togglePlayback,
-  } = useLocalAudioPlayer();
+  } = useLocalAudioPlayer({
+    pauseOnHeadphoneDisconnect,
+    resumeOnHeadphoneReconnect,
+  });
   const [showQueue, setShowQueue] = useState(true);
   const [showFileType, setShowFileType] = useState(false);
   const [playlistPlayerPosition, setPlaylistPlayerPosition] =
     useState<PlaylistPlayerPosition>("bottom");
-  const [visualizationEnabled, setVisualizationEnabled] = useState(false);
+  const [visualizationEnabled, setVisualizationEnabled] = useState(true);
   const [visualizationEffect, setVisualizationEffect] =
     useState<VisualizationEffect>("bars");
   const [visualizationPrimaryColor, setVisualizationPrimaryColor] =
     useState("#ffffff");
   const [visualizationSecondaryColor, setVisualizationSecondaryColor] =
     useState("#ffd60a");
+  const [visualizationBackgroundColor, setVisualizationBackgroundColor] =
+    useState<string | null>(null);
   const [visualizationBackgroundImage, setVisualizationBackgroundImage] =
     useState<string | null>(null);
   const [screen, setScreen] = useState<
@@ -195,15 +212,28 @@ function AppContent() {
       VISUALIZATION_EFFECT_STORAGE_KEY,
       VISUALIZATION_PRIMARY_COLOR_STORAGE_KEY,
       VISUALIZATION_SECONDARY_COLOR_STORAGE_KEY,
+      VISUALIZATION_BACKGROUND_COLOR_STORAGE_KEY,
       VISUALIZATION_BACKGROUND_STORAGE_KEY,
+      PAUSE_ON_HEADPHONE_DISCONNECT_STORAGE_KEY,
+      RESUME_ON_HEADPHONE_RECONNECT_STORAGE_KEY,
     ])
       .then((storedSettings) => {
         const settings = new Map(storedSettings);
+        setPauseOnHeadphoneDisconnect(
+          settings.get(PAUSE_ON_HEADPHONE_DISCONNECT_STORAGE_KEY) !== "false",
+        );
+        setResumeOnHeadphoneReconnect(
+          settings.get(RESUME_ON_HEADPHONE_RECONNECT_STORAGE_KEY) === "true",
+        );
         setShowFileType(
           settings.get(SHOW_FILE_TYPE_STORAGE_KEY) === "true",
         );
+        const storedVisualizationEnabled = settings.get(
+          VISUALIZATION_STORAGE_KEY,
+        );
         setVisualizationEnabled(
-          settings.get(VISUALIZATION_STORAGE_KEY) === "true",
+          storedVisualizationEnabled == null ||
+            storedVisualizationEnabled === "true",
         );
 
         const storedEffect = settings.get(VISUALIZATION_EFFECT_STORAGE_KEY);
@@ -232,6 +262,13 @@ function AppContent() {
           setVisualizationSecondaryColor(storedSecondaryColor);
         }
 
+        const storedBackgroundColor = settings.get(
+          VISUALIZATION_BACKGROUND_COLOR_STORAGE_KEY,
+        );
+        if (storedBackgroundColor) {
+          setVisualizationBackgroundColor(storedBackgroundColor);
+        }
+
         setVisualizationBackgroundImage(
           settings.get(VISUALIZATION_BACKGROUND_STORAGE_KEY) ?? null,
         );
@@ -256,6 +293,24 @@ function AppContent() {
         // The in-memory setting still applies for the current session.
       },
     );
+  };
+  const updatePauseOnHeadphoneDisconnect = (enabled: boolean) => {
+    setPauseOnHeadphoneDisconnect(enabled);
+    AsyncStorage.setItem(
+      PAUSE_ON_HEADPHONE_DISCONNECT_STORAGE_KEY,
+      String(enabled),
+    ).catch(() => {
+      // The in-memory setting still applies for the current session.
+    });
+  };
+  const updateResumeOnHeadphoneReconnect = (enabled: boolean) => {
+    setResumeOnHeadphoneReconnect(enabled);
+    AsyncStorage.setItem(
+      RESUME_ON_HEADPHONE_RECONNECT_STORAGE_KEY,
+      String(enabled),
+    ).catch(() => {
+      // The in-memory setting still applies for the current session.
+    });
   };
   const updateVisualizationEnabled = (enabled: boolean) => {
     setVisualizationEnabled(enabled);
@@ -285,6 +340,15 @@ function AppContent() {
     setVisualizationSecondaryColor(color);
     AsyncStorage.setItem(
       VISUALIZATION_SECONDARY_COLOR_STORAGE_KEY,
+      color,
+    ).catch(() => {
+      // The in-memory setting still applies for the current session.
+    });
+  };
+  const updateVisualizationBackgroundColor = (color: string) => {
+    setVisualizationBackgroundColor(color);
+    AsyncStorage.setItem(
+      VISUALIZATION_BACKGROUND_COLOR_STORAGE_KEY,
       color,
     ).catch(() => {
       // The in-memory setting still applies for the current session.
@@ -393,8 +457,11 @@ function AppContent() {
           onScan={() => setScreen("scan")}
           onUpdateMetadata={updateTrackMetadata}
           queuedIds={queuedIds}
+          remoteToken={remoteToken}
           onSyncRemote={syncRemote}
           hasRemoteConnection={Boolean(remoteConnection)}
+          remoteError={remoteError}
+          remoteStatus={remoteStatus}
           showFileType={showFileType}
         />
       </SafeAreaView>
@@ -419,9 +486,12 @@ function AppContent() {
               setScreen("playlist");
             }
           }}
+          onMoveTrack={moveTrackInSavedPlaylist}
           onRemoveTrack={removeTrackFromSavedPlaylist}
           onRename={renameSavedPlaylist}
           playlists={savedPlaylists}
+          remoteStatus={remoteStatus}
+          remoteToken={remoteToken}
         />
       </SafeAreaView>
     );
@@ -445,6 +515,7 @@ function AppContent() {
           onNext={nextTrack}
           onPlayTrack={playTrack}
           onPrevious={previousTrack}
+          onMoveTrack={moveQueueTrack}
           onRemoveTrack={removeTrack}
           onOpenLibrary={() => setScreen("library")}
           onSeek={seekTo}
@@ -452,6 +523,8 @@ function AppContent() {
           onToggleShuffle={toggleShuffle}
           playerPosition={playlistPlayerPosition}
           queue={queue}
+          remoteStatus={remoteStatus}
+          remoteToken={remoteToken}
           repeatMode={repeatMode}
           showFileType={showFileType}
           track={track}
@@ -475,6 +548,10 @@ function AppContent() {
           onOpenPcConnectionGuide={() => setScreen("pcConnectionGuide")}
           onPlayerPositionChange={updatePlaylistPlayerPosition}
           onShowFileTypeChange={updateShowFileType}
+          onPauseOnHeadphoneDisconnectChange={updatePauseOnHeadphoneDisconnect}
+          onResumeOnHeadphoneReconnectChange={updateResumeOnHeadphoneReconnect}
+          pauseOnHeadphoneDisconnect={pauseOnHeadphoneDisconnect}
+          resumeOnHeadphoneReconnect={resumeOnHeadphoneReconnect}
           onVisualizationEffectChange={updateVisualizationEffect}
           onVisualizationEnabledChange={updateVisualizationEnabled}
           onVisualizationBackgroundImageChoose={
@@ -482,6 +559,9 @@ function AppContent() {
           }
           onVisualizationBackgroundImageRemove={
             removeVisualizationBackgroundImage
+          }
+          onVisualizationBackgroundColorChange={
+            updateVisualizationBackgroundColor
           }
           onVisualizationPrimaryColorChange={
             updateVisualizationPrimaryColor
@@ -496,6 +576,9 @@ function AppContent() {
           showFileType={showFileType}
           visualizationEffect={visualizationEffect}
           visualizationEnabled={visualizationEnabled}
+          visualizationBackgroundColor={
+            visualizationBackgroundColor ?? colors.accent
+          }
           visualizationBackgroundImage={visualizationBackgroundImage}
           visualizationPrimaryColor={visualizationPrimaryColor}
           visualizationSecondaryColor={visualizationSecondaryColor}
@@ -524,21 +607,48 @@ function AppContent() {
           </View>
           <Text style={styles.brandName}>HomeMusicPlayer</Text>
         </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Open settings"
-          onPress={() => setScreen("settings")}
-          style={({ pressed }) => [
-            styles.settingsButton,
-            pressed && styles.buttonPressed,
-          ]}
-        >
-          <Ionicons
-            name="settings-outline"
-            size={23}
-            color={colors.secondaryText}
-          />
-        </Pressable>
+        <View style={styles.headerActions}>
+          {remoteStatus === "syncing" && (
+            <View
+              accessibilityLabel="Syncing PC music"
+              accessibilityRole="progressbar"
+              style={styles.syncIndicator}
+            >
+              <ActivityIndicator color={colors.accent} size="small" />
+              <Text style={styles.syncIndicatorText}>Syncing</Text>
+            </View>
+          )}
+          {remoteStatus === "error" && remoteConnection && (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="PC music offline. Retry sync"
+              onPress={() => void syncRemote().catch(() => undefined)}
+              style={({ pressed }) => [
+                styles.syncIndicator,
+                styles.syncIndicatorError,
+                pressed && styles.buttonPressed,
+              ]}
+            >
+              <Ionicons name="cloud-offline-outline" color="#d92d20" size={16} />
+              <Text style={styles.syncIndicatorErrorText}>Retry</Text>
+            </Pressable>
+          )}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open settings"
+            onPress={() => setScreen("settings")}
+            style={({ pressed }) => [
+              styles.settingsButton,
+              pressed && styles.buttonPressed,
+            ]}
+          >
+            <Ionicons
+              name="settings-outline"
+              size={23}
+              color={colors.secondaryText}
+            />
+          </Pressable>
+        </View>
       </View>
 
       <ScrollView
@@ -553,7 +663,8 @@ function AppContent() {
                 visualizationEnabled &&
                 isPlaying &&
                 !visualizationBackgroundImage && {
-                  backgroundColor: colors.accent,
+                  backgroundColor:
+                    visualizationBackgroundColor ?? colors.accent,
                 },
             ]}
           >
@@ -940,8 +1051,12 @@ function AppContent() {
                       index={index}
                       isCurrent={index === currentIndex}
                       key={item.id}
+                      onMoveTrack={moveQueueTrack}
                       onPlayTrack={playTrack}
                       onRemoveTrack={removeTrack}
+                      queueLength={queue.length}
+                      remoteStatus={remoteStatus}
+                      remoteToken={remoteToken}
                       showFileType={showFileType}
                       track={item}
                     />
@@ -1022,6 +1137,27 @@ const createStyles = (colors: ThemeColors) =>
     alignItems: "center",
     flexDirection: "row",
     gap: 2,
+  },
+  syncIndicator: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 6,
+  },
+  syncIndicatorText: {
+    color: colors.secondaryText,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  syncIndicatorError: {
+    backgroundColor: "#d92d2014",
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  syncIndicatorErrorText: {
+    color: "#d92d20",
+    fontSize: 12,
+    fontWeight: "700",
   },
   queueButton: {
     alignItems: "center",

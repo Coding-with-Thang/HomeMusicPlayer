@@ -212,6 +212,21 @@ test("pairing protects the catalog and streams byte ranges", async () => {
     }>();
     assert.equal(page.total, 2);
     assert.equal(page.nextOffset, 1);
+
+    const { epoch, revision } = library.json<{ epoch: string; revision: number }>();
+    const changes = await api.inject({
+      method: "GET",
+      url: `/api/v1/library/changes?since=${revision}&epoch=${epoch}`,
+      headers: apiHeaders,
+    });
+    assert.equal(changes.statusCode, 200);
+    assert.deepEqual(changes.json<{ resetRequired: boolean; upserts: unknown[] }>().upserts, []);
+    const staleChanges = await api.inject({
+      method: "GET",
+      url: "/api/v1/library/changes?since=0&epoch=stale",
+      headers: apiHeaders,
+    });
+    assert.equal(staleChanges.json<{ resetRequired: boolean }>().resetRequired, true);
     const streamedTrack = page.items.find((item) => item.name === "test");
     const trackId =
       streamedTrack?.id ??

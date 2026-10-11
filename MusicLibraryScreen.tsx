@@ -1,6 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useMemo, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   FlatList,
   Modal,
@@ -12,6 +13,7 @@ import {
 } from "react-native";
 
 import { MetadataEditorModal } from "./MetadataEditorModal";
+import { TrackArtwork } from "./TrackArtwork";
 import type { EditableTrackMetadata, LocalTrack } from "./useLocalAudioPlayer";
 import { type ThemeColors, useTheme } from "./theme";
 
@@ -28,6 +30,10 @@ function displayMetadata(value: string | number | undefined, fallback: string) {
 }
 
 type SortDirection = "ascending" | "descending";
+type LibraryView = "songs" | "artists" | "genres";
+type LibraryListItem =
+  | { key: string; type: "group"; label: string; count: number }
+  | { key: string; type: "track"; track: LocalTrack };
 type SortField =
   | "name"
   | "artist"
@@ -103,6 +109,9 @@ type MusicLibraryScreenProps = {
     metadata: EditableTrackMetadata,
   ) => Promise<LocalTrack>;
   queuedIds: Set<string>;
+  remoteError: string | null;
+  remoteStatus: "disconnected" | "connecting" | "connected" | "syncing" | "error";
+  remoteToken: string | null;
   showFileType: boolean;
 };
 
@@ -118,11 +127,15 @@ export function MusicLibraryScreen({
   onSyncRemote,
   onUpdateMetadata,
   queuedIds,
+  remoteError,
+  remoteStatus,
+  remoteToken,
   showFileType,
 }: MusicLibraryScreenProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [libraryView, setLibraryView] = useState<LibraryView>("songs");
   const [isAdvancedView, setIsAdvancedView] = useState(false);
   const [editingTrack, setEditingTrack] = useState<LocalTrack | null>(null);
   const [sortDirection, setSortDirection] =
@@ -133,8 +146,8 @@ export function MusicLibraryScreen({
     "all",
   );
   const listExtraData = useMemo(
-    () => ({ isAdvancedView, queuedIds, showFileType }),
-    [isAdvancedView, queuedIds, showFileType],
+    () => ({ isAdvancedView, libraryView, queuedIds, showFileType }),
+    [isAdvancedView, libraryView, queuedIds, showFileType],
   );
   const sortLabel =
     SORT_OPTIONS.find((option) => option.field === sortField)?.label ?? "Title";
@@ -166,6 +179,49 @@ export function MusicLibraryScreen({
       compareTracks(left, right, sortField, sortDirection),
     );
   }, [library, searchQuery, sortDirection, sortField, sourceFilter]);
+  const libraryItems = useMemo<LibraryListItem[]>(() => {
+    if (libraryView === "songs") {
+      return filteredLibrary.map((track) => ({
+        key: `track:${track.id}`,
+        track,
+        type: "track",
+      }));
+    }
+
+    const groups = new Map<string, LocalTrack[]>();
+    filteredLibrary.forEach((track) => {
+      const label =
+        libraryView === "artists"
+          ? track.artist.trim() || "Unknown Artist"
+          : track.genre?.trim() || "Unknown Genre";
+      groups.set(label, [...(groups.get(label) ?? []), track]);
+    });
+
+    const direction = sortDirection === "ascending" ? 1 : -1;
+    return [...groups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right) * direction)
+      .flatMap(([label, tracks]) => [
+        {
+          count: tracks.length,
+          key: `group:${libraryView}:${label}`,
+          label,
+          type: "group" as const,
+        },
+        ...tracks
+          .sort(
+            (left, right) =>
+              left.name.localeCompare(right.name, undefined, {
+                numeric: true,
+                sensitivity: "base",
+              }) * direction,
+          )
+          .map((track) => ({
+            key: `track:${track.id}`,
+            track,
+            type: "track" as const,
+          })),
+      ]);
+  }, [filteredLibrary, libraryView, sortDirection]);
 
   return (
     <View style={styles.screen}>
@@ -324,6 +380,62 @@ export function MusicLibraryScreen({
         )}
       </View>
 
+      {hasRemoteConnection && (
+        <View
+          accessibilityRole={remoteStatus === "syncing" ? "progressbar" : "text"}
+          style={[
+            styles.remoteStatusCard,
+            remoteStatus === "error" && styles.remoteStatusCardError,
+          ]}
+        >
+          {remoteStatus === "syncing" || remoteStatus === "connecting" ? (
+            <ActivityIndicator color={colors.accent} size="small" />
+          ) : (
+            <Ionicons
+              name={
+                remoteStatus === "error"
+                  ? "cloud-offline-outline"
+                  : "cloud-done-outline"
+              }
+              color={remoteStatus === "error" ? "#d92d20" : "#22a447"}
+              size={19}
+            />
+          )}
+          <View style={styles.remoteStatusText}>
+            <Text style={styles.remoteStatusTitle}>
+              {remoteStatus === "syncing"
+                ? "Syncing PC library"
+                : remoteStatus === "connecting"
+                  ? "Connecting to PC"
+                  : remoteStatus === "error"
+                    ? "PC library offline"
+                    : "PC library synced"}
+            </Text>
+            <Text numberOfLines={1} style={styles.remoteStatusDescription}>
+              {remoteStatus === "error"
+                ? remoteError || "Showing the last synced library."
+                : remoteStatus === "connected"
+                  ? "Remote songs are up to date."
+                  : "Your saved library remains available while this finishes."}
+            </Text>
+          </View>
+          {remoteStatus === "error" && (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Retry PC library sync"
+              onPress={() => void onSyncRemote().catch(() => undefined)}
+              style={({ pressed }) => [
+                styles.retryButton,
+                pressed && styles.buttonPressed,
+              ]}
+            >
+              <Ionicons name="refresh" color={colors.accent} size={16} />
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
+
       {library.length > 0 && (
         <View style={styles.libraryToolbar}>
           <View style={styles.toolbarTopRow}>
@@ -386,25 +498,58 @@ export function MusicLibraryScreen({
               </Text>
             </Pressable>
           </View>
+          <View accessibilityRole="radiogroup" style={styles.viewFilters}>
+            {(
+              [
+                ["songs", "Songs"],
+                ["artists", "Artists"],
+                ["genres", "Genres"],
+              ] as const
+            ).map(([value, label]) => (
+              <Pressable
+                accessibilityRole="radio"
+                accessibilityState={{ checked: libraryView === value }}
+                key={value}
+                onPress={() => setLibraryView(value)}
+                style={[
+                  styles.viewFilter,
+                  libraryView === value && styles.viewFilterActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.viewFilterText,
+                    libraryView === value && styles.viewFilterTextActive,
+                  ]}
+                >
+                  {label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
           <View style={styles.sortRow}>
-            <Text style={styles.sortByLabel}>SORT BY</Text>
-            <Pressable
-              accessibilityLabel={`Sort library by ${sortLabel}`}
-              accessibilityRole="button"
-              onPress={() => setShowSortPicker(true)}
-              style={({ pressed }) => [
-                styles.sortFieldButton,
-                pressed && styles.buttonPressed,
-              ]}
-            >
-              <Ionicons name="funnel-outline" color={colors.accent} size={15} />
-              <Text style={styles.sortFieldText}>{sortLabel}</Text>
-              <Ionicons
-                name="chevron-down"
-                color={colors.secondaryText}
-                size={15}
-              />
-            </Pressable>
+            <Text style={styles.sortByLabel}>
+              {libraryView === "songs" ? "SORT BY" : "GROUP ORDER"}
+            </Text>
+            {libraryView === "songs" && (
+              <Pressable
+                accessibilityLabel={`Sort library by ${sortLabel}`}
+                accessibilityRole="button"
+                onPress={() => setShowSortPicker(true)}
+                style={({ pressed }) => [
+                  styles.sortFieldButton,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Ionicons name="funnel-outline" color={colors.accent} size={15} />
+                <Text style={styles.sortFieldText}>{sortLabel}</Text>
+                <Ionicons
+                  name="chevron-down"
+                  color={colors.secondaryText}
+                  size={15}
+                />
+              </Pressable>
+            )}
             <Pressable
               accessibilityLabel={`Sort ${sortDirection === "ascending" ? "descending" : "ascending"}`}
               accessibilityRole="button"
@@ -463,11 +608,13 @@ export function MusicLibraryScreen({
           styles.listContent,
           filteredLibrary.length === 0 && styles.emptyList,
         ]}
-        data={filteredLibrary}
+        data={libraryItems}
         extraData={listExtraData}
-        keyExtractor={(item) => item.id}
+        keyExtractor={(item) => item.key}
         ListHeaderComponent={
-          isAdvancedView && filteredLibrary.length > 0 ? (
+          isAdvancedView &&
+          libraryView === "songs" &&
+          filteredLibrary.length > 0 ? (
             <View style={styles.advancedListHeader}>
               <Text style={styles.advancedListHeaderText}>SONG & ARTISTS</Text>
               <Text style={styles.advancedListHeaderText}>METADATA</Text>
@@ -518,8 +665,29 @@ export function MusicLibraryScreen({
             </View>
           )
         }
-        renderItem={({ item }) => {
+        renderItem={({ item: listItem }) => {
+          if (listItem.type === "group") {
+            return (
+              <View style={styles.groupHeader}>
+                <Text numberOfLines={1} style={styles.groupHeaderTitle}>
+                  {listItem.label}
+                </Text>
+                <Text style={styles.groupHeaderCount}>
+                  {listItem.count} {listItem.count === 1 ? "song" : "songs"}
+                </Text>
+              </View>
+            );
+          }
+          const item = listItem.track;
           const isQueued = queuedIds.has(item.id);
+          const sourceBadge =
+            item.source === "local"
+              ? "DEVICE"
+              : remoteStatus === "syncing"
+                ? "SYNCING"
+                : remoteStatus === "error"
+                  ? "STALE"
+                  : "PC";
           if (isAdvancedView) {
             const artists = splitArtistNames(item.artist);
             return (
@@ -534,6 +702,12 @@ export function MusicLibraryScreen({
                 ]}
               >
                 <View style={styles.advancedTitleRow}>
+                  <TrackArtwork
+                    borderRadius={7}
+                    remoteToken={remoteToken}
+                    size={30}
+                    track={item}
+                  />
                   <Text numberOfLines={1} style={styles.advancedTrackName}>
                     {item.name}
                   </Text>
@@ -541,7 +715,7 @@ export function MusicLibraryScreen({
                     <Text style={styles.advancedFormat}>{item.extension}</Text>
                   )}
                   <Text style={styles.sourceBadge}>
-                    {item.source === "remote" ? "PC" : "DEVICE"}
+                    {sourceBadge}
                   </Text>
                   <Pressable
                     accessibilityRole="button"
@@ -627,9 +801,7 @@ export function MusicLibraryScreen({
                 pressed && styles.trackRowPressed,
               ]}
             >
-              <View style={styles.artwork}>
-                <Ionicons name="musical-note" color="#fff" size={20} />
-              </View>
+              <TrackArtwork remoteToken={remoteToken} track={item} />
               <View style={styles.trackDetails}>
                 <Text numberOfLines={1} style={styles.trackName}>
                   {item.name}
@@ -643,7 +815,7 @@ export function MusicLibraryScreen({
                 <Text style={styles.format}>{item.extension}</Text>
               )}
               <Text style={styles.sourceBadge}>
-                {item.source === "remote" ? "PC" : "DEVICE"}
+                {sourceBadge}
               </Text>
               <Pressable
                 accessibilityRole="button"
@@ -780,10 +952,77 @@ const createStyles = (colors: ThemeColors) =>
       marginBottom: 12,
       marginHorizontal: 14,
     },
+    remoteStatusCard: {
+      alignItems: "center",
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderRadius: 12,
+      borderWidth: StyleSheet.hairlineWidth,
+      flexDirection: "row",
+      gap: 9,
+      marginBottom: 12,
+      marginHorizontal: 14,
+      paddingHorizontal: 11,
+      paddingVertical: 9,
+    },
+    remoteStatusCardError: {
+      borderColor: "#d92d2066",
+    },
+    remoteStatusText: {
+      flex: 1,
+      minWidth: 0,
+    },
+    remoteStatusTitle: {
+      color: colors.text,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+    remoteStatusDescription: {
+      color: colors.secondaryText,
+      fontSize: 10,
+      marginTop: 2,
+    },
+    retryButton: {
+      alignItems: "center",
+      backgroundColor: colors.accentSoft,
+      borderRadius: 10,
+      flexDirection: "row",
+      gap: 4,
+      paddingHorizontal: 9,
+      paddingVertical: 7,
+    },
+    retryButtonText: {
+      color: colors.accent,
+      fontSize: 11,
+      fontWeight: "700",
+    },
     toolbarTopRow: {
       alignItems: "center",
       flexDirection: "row",
       gap: 8,
+    },
+    viewFilters: {
+      backgroundColor: colors.elevated,
+      borderRadius: 12,
+      flexDirection: "row",
+      padding: 3,
+    },
+    viewFilter: {
+      alignItems: "center",
+      borderRadius: 9,
+      flex: 1,
+      paddingVertical: 7,
+    },
+    viewFilterActive: {
+      backgroundColor: colors.surface,
+    },
+    viewFilterText: {
+      color: colors.secondaryText,
+      fontSize: 11,
+      fontWeight: "700",
+    },
+    viewFilterTextActive: {
+      color: colors.accent,
     },
     sortRow: {
       alignItems: "center",
@@ -904,6 +1143,24 @@ const createStyles = (colors: ThemeColors) =>
       gap: 8,
       paddingBottom: 20,
       paddingHorizontal: 14,
+    },
+    groupHeader: {
+      alignItems: "center",
+      flexDirection: "row",
+      justifyContent: "space-between",
+      paddingHorizontal: 6,
+      paddingTop: 10,
+    },
+    groupHeaderTitle: {
+      color: colors.text,
+      flex: 1,
+      fontSize: 17,
+      fontWeight: "700",
+    },
+    groupHeaderCount: {
+      color: colors.secondaryText,
+      fontSize: 10,
+      fontWeight: "600",
     },
     emptyList: {
       flex: 1,

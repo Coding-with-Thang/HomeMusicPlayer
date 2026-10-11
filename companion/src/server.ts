@@ -29,6 +29,7 @@ import {
   verifyPassword,
 } from "./auth.js";
 import { MusicLibraryIndex } from "./library.js";
+import { LibraryWatcher } from "./watcher.js";
 import {
   ALL_TOKEN_SCOPES,
   type CompanionConfig,
@@ -202,7 +203,7 @@ function adminHtml(
     : `<p class="muted">No phones are paired.</p>`;
   return pageHtml(
     `<p class="muted">Authenticated local administration.</p>
-<section><h2>Music folders</h2><textarea id="roots" rows="6" placeholder="C:\\Users\\you\\Music">${roots}</textarea><p><button id="saveRoots">Save and rescan</button></p><p id="scan">${index.count} tracks indexed${index.scannedAt ? ` · last scan ${escapeHtml(index.scannedAt)}` : ""}</p></section>
+<section><h2>Music folders</h2><textarea id="roots" rows="6" placeholder="C:\\Users\\you\\Music">${roots}</textarea><p><button id="saveRoots">Save and rescan</button></p><p id="scan">${index.count} tracks indexed · revision ${index.revision}${index.scannedAt ? ` · last scan ${escapeHtml(index.scannedAt)}` : ""}</p><p class="muted">New, changed, and removed files are picked up automatically while the companion runs.</p></section>
 <section><h2>Private Tailscale HTTPS</h2><p>Run this in an Administrator PowerShell window after signing into Tailscale:</p><code>tailscale serve --bg ${config.apiPort}</code><p class="muted">Use Serve, not Funnel. Use the resulting https://*.ts.net address in the mobile app.</p></section>
 <section><h2>Pair a phone</h2><button id="pair">Generate pairing code</button><h3 id="code"></h3></section>
 <section><h2>Paired devices</h2>${devices}<p><button id="revokeAll" class="danger">Revoke all devices</button></p></section>
@@ -222,23 +223,34 @@ document.querySelector('#logout').onclick=async()=>{await fetch('/admin/logout',
 export function buildServers(
   config: CompanionConfig,
   saveConfig: (config: CompanionConfig) => Promise<void>,
-  options: { bootstrapCode?: string } = {},
+  options: { bootstrapCode?: string; indexStoragePath?: string; watchLibrary?: boolean } = {},
 ) {
   const pairing = new PairingManager();
   const adminSessions = new AdminSessionManager();
   const loginLimiter = new AttemptLimiter();
   const pairingLimiter = new AttemptLimiter(12, 15 * 60 * 1000);
   const authenticatedTokens = new WeakMap<object, DeviceToken>();
-  const index = new MusicLibraryIndex(config.serverId);
+  const index = new MusicLibraryIndex(config.serverId, options.indexStoragePath);
   const api = Fastify({ logger: true });
   const admin = Fastify({ logger: true });
+  const watcher = options.watchLibrary ? new LibraryWatcher(index, api.log) : null;
+  const rescanRoots = async () => {
+    const count = await index.scan(config.libraryRoots);
+    await watcher?.start(config.libraryRoots);
+    return count;
+  };
 
   const audit = (event: string, details: Record<string, unknown> = {}) => {
     api.log.info({ audit: event, ...details }, "security audit");
   };
 
   const requiredScope = (method: string, pathname: string): TokenScope | null => {
-    if (pathname === "/api/v1/library" && method === "GET") return "library:read";
+    if (
+      (pathname === "/api/v1/library" || pathname === "/api/v1/library/changes") &&
+      method === "GET"
+    ) {
+      return "library:read";
+    }
     if (/^\/api\/v1\/tracks\/[^/]+\/artwork$/.test(pathname) && method === "GET") {
       return "library:read";
     }
@@ -278,6 +290,8 @@ export function buildServers(
 
   api.get("/api/v1/health", async () => ({
     apiVersion: 1,
+    epoch: index.epoch,
+    revision: index.revision,
     serverId: config.serverId,
     trackCount: index.count,
   }));
@@ -329,6 +343,15 @@ export function buildServers(
     },
   );
 
+  api.get<{ Querystring: { epoch?: string; limit?: string; since?: string } }>(
+    "/api/v1/library/changes",
+    async (request) => {
+      const since = Math.max(Number.parseInt(request.query.since ?? "0", 10) || 0, 0);
+      const limit = Math.min(Math.max(Number.parseInt(request.query.limit ?? "500", 10) || 500, 1), 1000);
+      return { serverId: config.serverId, ...index.changesSince(since, request.query.epoch, limit) };
+    },
+  );
+
   api.get<{ Querystring: { path?: string } }>(
     "/api/v1/directories",
     async (request, reply) => {
@@ -364,7 +387,7 @@ export function buildServers(
         ),
       ];
       await saveConfig(config);
-      const count = await index.scan(config.libraryRoots);
+      const count = await rescanRoots();
       audit("library.roots_changed", {
         deviceId: authenticatedTokens.get(request)?.id,
         rootCount: config.libraryRoots.length,
@@ -374,7 +397,7 @@ export function buildServers(
   );
 
   api.get<{ Params: { id: string } }>("/api/v1/tracks/:id/artwork", async (request, reply) => {
-    const artwork = index.getTrack(request.params.id)?.artwork;
+    const artwork = await index.getArtwork(request.params.id);
     if (!artwork) return reply.code(404).send({ error: "Artwork not found." });
     return reply.type(artwork.mimeType).send(Buffer.from(artwork.data));
   });
@@ -440,7 +463,7 @@ export function buildServers(
         throw error;
       }
 
-      await index.scan(config.libraryRoots);
+      await index.reindexPaths([track.filePath]);
       audit("track.metadata_changed", {
         deviceId: authenticatedTokens.get(request)?.id,
         trackId: request.params.id,
@@ -611,7 +634,7 @@ export function buildServers(
       .map((entry) => entry.path);
     await saveConfig(config);
     try {
-      const count = await index.scan(config.libraryRoots);
+      const count = await rescanRoots();
       audit("library.roots_changed", { actor: "admin", rootCount: config.libraryRoots.length });
       return { count };
     } catch (error) {
@@ -665,5 +688,5 @@ export function buildServers(
     },
   );
 
-  return { admin, api, index };
+  return { admin, api, index, rescanRoots, watcher };
 }

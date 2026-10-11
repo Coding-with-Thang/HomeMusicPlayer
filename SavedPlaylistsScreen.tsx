@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   BackHandler,
   FlatList,
   KeyboardAvoidingView,
@@ -15,6 +16,7 @@ import {
 
 import type { LocalTrack, SavedPlaylist } from './useLocalAudioPlayer';
 import { type ThemeColors, useTheme } from './theme';
+import { TrackArtwork } from './TrackArtwork';
 
 type SavedPlaylistsScreenProps = {
   library: LocalTrack[];
@@ -26,9 +28,16 @@ type SavedPlaylistsScreenProps = {
   onDelete: (playlistId: string) => void;
   onOpenLibrary: () => void;
   onPlayPlaylist: (playlistId: string) => void;
+  onMoveTrack: (
+    playlistId: string,
+    trackId: string,
+    direction: -1 | 1
+  ) => void;
   onRemoveTrack: (playlistId: string, trackId: string) => void;
   onRename: (playlistId: string, name: string) => boolean;
   playlists: SavedPlaylist[];
+  remoteStatus: 'disconnected' | 'connecting' | 'connected' | 'syncing' | 'error';
+  remoteToken: string | null;
 };
 
 export function SavedPlaylistsScreen({
@@ -41,9 +50,12 @@ export function SavedPlaylistsScreen({
   onDelete,
   onOpenLibrary,
   onPlayPlaylist,
+  onMoveTrack,
   onRemoveTrack,
   onRename,
   playlists,
+  remoteStatus,
+  remoteToken,
 }: SavedPlaylistsScreenProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -73,8 +85,11 @@ export function SavedPlaylistsScreen({
       if (!selectedPlaylist) {
         return [];
       }
+      const refsById = new Map(
+        selectedPlaylist.trackRefs.map((track) => [track.id, track])
+      );
       return selectedPlaylist.trackIds
-        .map((id) => libraryById.get(id))
+        .map((id) => libraryById.get(id) ?? refsById.get(id))
         .filter((track): track is LocalTrack => Boolean(track));
     },
     [libraryById, selectedPlaylist]
@@ -307,8 +322,49 @@ export function SavedPlaylistsScreen({
               </View>
             }
             renderItem={({ item, index }) => (
-              <View style={styles.trackRow}>
-                <Text style={styles.trackIndex}>{index + 1}</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`${item.name} by ${item.artist}`}
+                accessibilityHint="Long press to move this song"
+                delayLongPress={400}
+                onLongPress={() =>
+                  Alert.alert(
+                    'Move song',
+                    `Choose a new position for “${item.name}”.`,
+                    [
+                      ...(index > 0
+                        ? [
+                            {
+                              text: 'Move up',
+                              onPress: () =>
+                                onMoveTrack(selectedPlaylist.id, item.id, -1),
+                            },
+                          ]
+                        : []),
+                      ...(index < selectedTracks.length - 1
+                        ? [
+                            {
+                              text: 'Move down',
+                              onPress: () =>
+                                onMoveTrack(selectedPlaylist.id, item.id, 1),
+                            },
+                          ]
+                        : []),
+                      { text: 'Cancel', style: 'cancel' as const },
+                    ]
+                  )
+                }
+                style={({ pressed }) => [
+                  styles.trackRow,
+                  pressed && styles.playlistRowPressed,
+                ]}
+              >
+                <TrackArtwork
+                  borderRadius={8}
+                  remoteToken={remoteToken}
+                  size={40}
+                  track={item}
+                />
                 <View style={styles.trackDetails}>
                   <Text numberOfLines={1} style={styles.trackName}>
                     {item.name}
@@ -317,6 +373,20 @@ export function SavedPlaylistsScreen({
                     {item.artist}
                   </Text>
                 </View>
+                {item.isAvailable === false && (
+                  <Text style={styles.unavailableBadge}>
+                    {item.source === 'remote' ? 'OFFLINE' : 'MISSING'}
+                  </Text>
+                )}
+                {item.source === 'remote' && item.isAvailable !== false && (
+                  <Text style={styles.sourceBadge}>
+                    {remoteStatus === 'syncing'
+                      ? 'SYNCING'
+                      : remoteStatus === 'error'
+                        ? 'STALE'
+                        : 'PC'}
+                  </Text>
+                )}
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel={`Remove ${item.name} from playlist`}
@@ -330,7 +400,7 @@ export function SavedPlaylistsScreen({
                 >
                   <Ionicons name="remove-circle" color={colors.muted} size={22} />
                 </Pressable>
-              </View>
+              </Pressable>
             )}
             showsVerticalScrollIndicator={false}
           />
@@ -1005,6 +1075,16 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   configNameInput: { marginTop: 7 },
   errorText: { color: '#d92d20', fontSize: 11, marginTop: 6 },
+  unavailableBadge: {
+    color: '#d92d20',
+    fontSize: 8,
+    fontWeight: '800',
+  },
+  sourceBadge: {
+    color: colors.accent,
+    fontSize: 8,
+    fontWeight: '800',
+  },
   modalActions: {
     flexDirection: 'row',
     gap: 9,

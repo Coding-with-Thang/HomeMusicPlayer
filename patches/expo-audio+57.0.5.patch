@@ -1,0 +1,162 @@
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
+index c76a9fd..94ee656 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
+@@ -24,6 +24,7 @@ import java.lang.ref.WeakReference
+ 
+ private const val PLAYBACK_STATUS_UPDATE = "playbackStatusUpdate"
+ private const val AUDIO_SAMPLE_UPDATE = "audioSampleUpdate"
++private const val REMOTE_COMMAND = "remoteCommand"
+ private const val SEEK_JUMP_INTERVAL_MS: Long = 10_000
+ 
+ @UnstableApi
+@@ -224,6 +225,10 @@ class AudioPlayer(
+     mediaSession = buildBasicMediaSession(context, ref)
+   }
+ 
++  fun emitRemoteCommand(command: String) {
++    emit(REMOTE_COMMAND, mapOf("command" to command))
++  }
++
+   private fun sendAudioSampleUpdate(sample: List<Float>) {
+     val body = mapOf(
+       "channels" to listOf(
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+index 196a5d5..9872634 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+@@ -250,6 +250,15 @@ class AudioControlsService : MediaSessionService() {
+           .setSlots(CommandButton.SLOT_BACK)
+           .build()
+       )
++    } else {
++      mediaButtons.add(
++        CommandButton.Builder(CommandButton.ICON_PREVIOUS)
++          .setDisplayName("Previous")
++          .setEnabled(true)
++          .setPlayerCommand(Player.COMMAND_SEEK_TO_PREVIOUS)
++          .setSlots(CommandButton.SLOT_BACK)
++          .build()
++      )
+     }
+ 
+     // Add play/pause button (always present)
+@@ -272,6 +281,15 @@ class AudioControlsService : MediaSessionService() {
+           .setSlots(CommandButton.SLOT_FORWARD)
+           .build()
+       )
++    } else {
++      mediaButtons.add(
++        CommandButton.Builder(CommandButton.ICON_NEXT)
++          .setDisplayName("Next")
++          .setEnabled(true)
++          .setPlayerCommand(Player.COMMAND_SEEK_TO_NEXT)
++          .setSlots(CommandButton.SLOT_FORWARD)
++          .build()
++      )
+     }
+ 
+     session.setCustomLayout(mediaButtons)
+@@ -367,7 +385,9 @@ class AudioControlsService : MediaSessionService() {
+ 
+       appContext?.mainQueue?.launch {
+         val context = appContext?.reactContext ?: return@launch
+-        val sessionPlayer = MetadataInjectingPlayer(resolveSessionPlayer(player, options)).apply {
++        val sessionPlayer = MetadataInjectingPlayer(resolveSessionPlayer(player, options)) { command ->
++          player.emitRemoteCommand(command)
++        }.apply {
+           updateMetadata(metadata)
+         }
+         val session = MediaSession.Builder(context, sessionPlayer)
+@@ -448,7 +468,9 @@ class AudioControlsService : MediaSessionService() {
+       sessionMetadataPlayer = null
+       appContext?.mainQueue?.launch {
+         val context = appContext?.reactContext ?: return@launch
+-        val sessionPlayer = MetadataInjectingPlayer(resolveSessionPlayer(player, options)).apply {
++        val sessionPlayer = MetadataInjectingPlayer(resolveSessionPlayer(player, options)) { command ->
++          player.emitRemoteCommand(command)
++        }.apply {
+           updateMetadata(metadata)
+         }
+         val session = MediaSession.Builder(context, sessionPlayer)
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt
+index 839aaef..dab2ff2 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt
+@@ -24,11 +24,11 @@ class AudioMediaSessionCallback : MediaSession.Callback {
+             .add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+             .add(Player.COMMAND_SEEK_FORWARD)
+             .add(Player.COMMAND_SEEK_BACK)
+-            // Remove track navigation commands
+-            .remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+-            .remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+-            .remove(Player.COMMAND_SEEK_TO_PREVIOUS)
+-            .remove(Player.COMMAND_SEEK_TO_NEXT)
++            // Track navigation is forwarded to JS as remoteCommand events
++            .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
++            .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
++            .add(Player.COMMAND_SEEK_TO_PREVIOUS)
++            .add(Player.COMMAND_SEEK_TO_NEXT)
+             .build()
+         )
+         .setAvailableSessionCommands(
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/MetadataInjectingPlayer.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/MetadataInjectingPlayer.kt
+index 18203a3..7af2010 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/MetadataInjectingPlayer.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/MetadataInjectingPlayer.kt
+@@ -16,12 +16,43 @@ import java.util.IdentityHashMap
+ // metadata updates without replacing the active media item on the real ExoPlayer instance.
+ @UnstableApi
+ internal class MetadataInjectingPlayer(
+-  player: Player
++  player: Player,
++  private val onRemoteCommand: (String) -> Unit = {}
+ ) : ForwardingPlayer(player) {
+   private val handler = Handler(applicationLooper)
+   private val listeners = IdentityHashMap<Player.Listener, Player.Listener>()
+   private var injectedMetadata: Metadata? = null
+ 
++  override fun getAvailableCommands(): Player.Commands {
++    return super.getAvailableCommands()
++      .buildUpon()
++      .addAll(
++        Player.COMMAND_SEEK_TO_NEXT,
++        Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
++        Player.COMMAND_SEEK_TO_PREVIOUS,
++        Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM
++      )
++      .build()
++  }
++
++  override fun isCommandAvailable(command: Int): Boolean {
++    return when (command) {
++      Player.COMMAND_SEEK_TO_NEXT,
++      Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
++      Player.COMMAND_SEEK_TO_PREVIOUS,
++      Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> true
++      else -> super.isCommandAvailable(command)
++    }
++  }
++
++  override fun seekToNext() = onRemoteCommand("next")
++
++  override fun seekToNextMediaItem() = onRemoteCommand("next")
++
++  override fun seekToPrevious() = onRemoteCommand("previous")
++
++  override fun seekToPreviousMediaItem() = onRemoteCommand("previous")
++
+   override fun addListener(listener: Player.Listener) {
+     val forwardingListener = synchronized(listeners) {
+       listeners.getOrPut(listener) { MetadataForwardingListener(listener) }
+@@ -86,6 +117,10 @@ internal class MetadataInjectingPlayer(
+       listener.onMediaMetadataChanged(this@MetadataInjectingPlayer.mediaMetadata)
+     }
+ 
++    override fun onAvailableCommandsChanged(availableCommands: Player.Commands) {
++      listener.onAvailableCommandsChanged(this@MetadataInjectingPlayer.availableCommands)
++    }
++
+     override fun onEvents(player: Player, events: Player.Events) {
+       listener.onEvents(this@MetadataInjectingPlayer, events)
+     }

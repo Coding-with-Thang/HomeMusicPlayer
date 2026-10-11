@@ -1,8 +1,9 @@
 import { Ionicons } from "@expo/vector-icons";
 import Slider from "@react-native-community/slider";
-import { memo, useMemo } from "react";
+import { memo, useMemo, useRef } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   StyleSheet,
@@ -12,13 +13,18 @@ import {
 
 import type { PlaylistPlayerPosition } from "./SettingsScreen";
 import { type ThemeColors, useTheme } from "./theme";
+import { TrackArtwork } from "./TrackArtwork";
 import type { LocalTrack, RepeatMode } from "./useLocalAudioPlayer";
 
 type QueueTrackRowProps = {
   index: number;
   isCurrent: boolean;
+  onMoveTrack: (fromIndex: number, toIndex: number) => void;
   onPlayTrack: (index: number) => void;
   onRemoveTrack: (index: number) => void;
+  queueLength: number;
+  remoteStatus: "disconnected" | "connecting" | "connected" | "syncing" | "error";
+  remoteToken: string | null;
   showFileType: boolean;
   track: LocalTrack;
 };
@@ -26,33 +32,72 @@ type QueueTrackRowProps = {
 export const QueueTrackRow = memo(function QueueTrackRow({
   index,
   isCurrent,
+  onMoveTrack,
   onPlayTrack,
   onRemoveTrack,
+  queueLength,
+  remoteStatus,
+  remoteToken,
   showFileType,
   track,
 }: QueueTrackRowProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const didLongPress = useRef(false);
+
+  const openReorderMenu = () => {
+    didLongPress.current = true;
+    Alert.alert(
+      "Move song",
+      `Choose a new position for “${track.name}”.`,
+      [
+        ...(index > 0
+          ? [
+              {
+                text: "Move up",
+                onPress: () => onMoveTrack(index, index - 1),
+              },
+            ]
+          : []),
+        ...(index < queueLength - 1
+          ? [
+              {
+                text: "Move down",
+                onPress: () => onMoveTrack(index, index + 1),
+              },
+            ]
+          : []),
+        { text: "Cancel", style: "cancel" as const },
+      ],
+    );
+  };
+
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`Play ${track.name} by ${track.artist}`}
-      onPress={() => onPlayTrack(index)}
+      accessibilityHint="Long press to move this song"
+      delayLongPress={400}
+      onLongPress={openReorderMenu}
+      onPress={() => {
+        if (didLongPress.current) {
+          didLongPress.current = false;
+          return;
+        }
+        onPlayTrack(index);
+      }}
       style={({ pressed }) => [
         styles.trackRow,
         isCurrent && styles.currentTrackRow,
         pressed && styles.trackRowPressed,
       ]}
     >
-      <View
-        style={[styles.trackNumber, isCurrent && styles.currentTrackNumber]}
-      >
-        {isCurrent ? (
-          <Ionicons name="volume-high" color="#fff" size={13} />
-        ) : (
-          <Text style={styles.trackNumberText}>{index + 1}</Text>
-        )}
-      </View>
+      <TrackArtwork
+        borderRadius={8}
+        remoteToken={remoteToken}
+        size={40}
+        track={track}
+      />
       <View style={styles.trackDetails}>
         <Text
           numberOfLines={1}
@@ -65,7 +110,20 @@ export const QueueTrackRow = memo(function QueueTrackRow({
         </Text>
       </View>
       {showFileType && <Text style={styles.format}>{track.extension}</Text>}
-      {track.source === "remote" && <Text style={styles.sourceBadge}>PC</Text>}
+      {track.isAvailable === false && (
+        <Text style={styles.unavailableBadge}>
+          {track.source === "remote" ? "OFFLINE" : "MISSING"}
+        </Text>
+      )}
+      {track.source === "remote" && (
+        <Text style={styles.sourceBadge}>
+          {remoteStatus === "syncing"
+            ? "SYNCING"
+            : remoteStatus === "error"
+              ? "STALE"
+              : "PC"}
+        </Text>
+      )}
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`Remove ${track.name} from playlist`}
@@ -94,6 +152,7 @@ type PlaylistScreenProps = {
   onClear: () => void;
   onCycleRepeat: () => void;
   onNext: () => void;
+  onMoveTrack: (fromIndex: number, toIndex: number) => void;
   onPlayTrack: (index: number) => void;
   onPrevious: () => void;
   onRemoveTrack: (index: number) => void;
@@ -103,6 +162,8 @@ type PlaylistScreenProps = {
   onToggleShuffle: () => void;
   playerPosition: PlaylistPlayerPosition;
   queue: LocalTrack[];
+  remoteStatus: "disconnected" | "connecting" | "connected" | "syncing" | "error";
+  remoteToken: string | null;
   repeatMode: RepeatMode;
   showFileType: boolean;
   track: LocalTrack | null;
@@ -120,6 +181,7 @@ export function PlaylistScreen({
   onClear,
   onCycleRepeat,
   onNext,
+  onMoveTrack,
   onPlayTrack,
   onPrevious,
   onRemoveTrack,
@@ -129,6 +191,8 @@ export function PlaylistScreen({
   onToggleShuffle,
   playerPosition,
   queue,
+  remoteStatus,
+  remoteToken,
   repeatMode,
   showFileType,
   track,
@@ -233,8 +297,12 @@ export function PlaylistScreen({
           <QueueTrackRow
             index={index}
             isCurrent={index === currentIndex}
+            onMoveTrack={onMoveTrack}
             onPlayTrack={onPlayTrack}
             onRemoveTrack={onRemoveTrack}
+            queueLength={queue.length}
+            remoteStatus={remoteStatus}
+            remoteToken={remoteToken}
             showFileType={showFileType}
             track={item}
           />
@@ -556,6 +624,11 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
   sourceBadge: {
     color: colors.accent,
     fontSize: 9,
+    fontWeight: "800",
+  },
+  unavailableBadge: {
+    color: "#d92d20",
+    fontSize: 8,
     fontWeight: "800",
   },
   removeButton: {

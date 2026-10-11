@@ -1,12 +1,19 @@
+import path from "node:path";
+
 import { createBootstrapCode } from "./auth.js";
-import { loadConfig, saveConfig } from "./config.js";
+import { getDataDirectory, loadConfig, saveConfig } from "./config.js";
 import { buildServers } from "./server.js";
 
 const config = await loadConfig();
 const bootstrapCode = config.adminPassword ? undefined : createBootstrapCode();
-const { admin, api, index } = buildServers(config, saveConfig, { bootstrapCode });
+const { admin, api, index, rescanRoots, watcher } = buildServers(config, saveConfig, {
+  bootstrapCode,
+  indexStoragePath: path.join(getDataDirectory(), "library-index.json"),
+  watchLibrary: true,
+});
 
-await index.scan(config.libraryRoots);
+await index.load();
+await rescanRoots();
 await Promise.all([
   admin.listen({ host: "127.0.0.1", port: config.adminPort }),
   api.listen({ host: "127.0.0.1", port: config.apiPort }),
@@ -19,7 +26,8 @@ if (bootstrapCode) {
 }
 
 const shutdown = async () => {
-  await Promise.all([admin.close(), api.close()]);
+  await Promise.all([admin.close(), api.close(), watcher?.close()]);
+  await index.flush();
   process.exit(0);
 };
 process.on("SIGINT", shutdown);

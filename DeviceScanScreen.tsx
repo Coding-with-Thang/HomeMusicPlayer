@@ -16,6 +16,7 @@ import {
 import {
   type AudioFileInput,
   isSupportedAudioFile,
+  type LibraryScanResult,
 } from './useLocalAudioPlayer';
 import type { RemoteConnection } from './remoteServer';
 import { type ThemeColors, useTheme } from './theme';
@@ -29,7 +30,10 @@ type ScanDirectory = {
 const SCAN_DIRECTORIES_STORAGE_KEY = 'home-audio-player.scan-directories.v1';
 
 type DeviceScanScreenProps = {
-  onAddToLibrary: (files: AudioFileInput[]) => Promise<number>;
+  onAddToLibrary: (
+    files: AudioFileInput[],
+    scannedRootUris: string[]
+  ) => Promise<LibraryScanResult>;
   onBack: () => void;
   onRemoteSync: () => Promise<number>;
   remoteConnection: RemoteConnection | null;
@@ -96,6 +100,9 @@ async function collectAudioFiles(root: ScanDirectory) {
         }
       }
     } catch {
+      if (directory.uri === root.uri) {
+        throw new Error(`The folder ${root.name} is not accessible.`);
+      }
       // Skip subdirectories that are no longer readable.
     }
 
@@ -207,12 +214,19 @@ export function DeviceScanScreen({
         enabledDirectories.map(collectAudioFiles)
       );
       const files = results.flat();
-      const addedCount = await onAddToLibrary(files);
+      const { addedCount, removedCount } = await onAddToLibrary(
+        files,
+        enabledDirectories.map((directory) => directory.uri)
+      );
 
       if (files.length === 0) {
         Alert.alert(
           'No audio found',
-          'No supported audio files were found in the selected folders.'
+          `No supported audio files were found in the selected folders.${
+            removedCount > 0
+              ? ` ${removedCount} missing ${removedCount === 1 ? 'song was' : 'songs were'} removed from the library.`
+              : ''
+          }`
         );
         return;
       }
@@ -223,6 +237,10 @@ export function DeviceScanScreen({
         `${addedCount} ${addedCount === 1 ? 'song was' : 'songs were'} added to your library.${
           duplicateCount > 0
             ? ` ${duplicateCount} already saved ${duplicateCount === 1 ? 'file was' : 'files were'} skipped.`
+            : ''
+        }${
+          removedCount > 0
+            ? ` ${removedCount} missing ${removedCount === 1 ? 'song was' : 'songs were'} removed from the library.`
             : ''
         }`
       );
@@ -254,10 +272,10 @@ export function DeviceScanScreen({
   const isRemoteSyncing = isSyncingRemote || remoteStatus === 'syncing';
   const remoteStatusLabel =
     remoteStatus === 'error'
-      ? 'Needs attention'
+      ? 'Offline · last sync retained'
       : isRemoteSyncing
-        ? 'Syncing'
-        : 'Connected';
+        ? 'Syncing library'
+        : 'Synced';
 
   return (
     <View style={styles.screen}>
@@ -334,10 +352,18 @@ export function DeviceScanScreen({
               {isRemoteSyncing ? (
                 <ActivityIndicator color={colors.accent} size="small" />
               ) : (
-                <Ionicons name="sync" color={colors.accent} size={19} />
+                <Ionicons
+                  name={remoteStatus === 'error' ? 'refresh' : 'sync'}
+                  color={colors.accent}
+                  size={19}
+                />
               )}
               <Text style={styles.syncButtonText}>
-                {isRemoteSyncing ? 'Syncing' : 'Sync'}
+                {isRemoteSyncing
+                  ? 'Syncing'
+                  : remoteStatus === 'error'
+                    ? 'Retry'
+                    : 'Sync'}
               </Text>
             </Pressable>
           </View>

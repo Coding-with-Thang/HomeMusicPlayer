@@ -89,6 +89,7 @@ export type EditableTrackMetadata = {
 export type RepeatMode = 'off' | 'all' | 'one';
 
 export type SavedPlaylist = {
+  artwork?: string;
   id: string;
   name: string;
   trackIds: string[];
@@ -627,6 +628,8 @@ export function useLocalAudioPlayer({
                   Array.isArray(item?.trackUris))
             )
             .map((item) => ({
+              artwork:
+                typeof item.artwork === 'string' ? item.artwork : undefined,
               id: item.id!,
               name: item.name!,
               trackIds: Array.isArray(item.trackIds)
@@ -1332,6 +1335,17 @@ export function useLocalAudioPlayer({
     [savedPlaylists]
   );
 
+  const updateSavedPlaylistArtwork = useCallback(
+    (playlistId: string, artwork?: string) => {
+      setSavedPlaylists((current) =>
+        current.map((playlist) =>
+          playlist.id === playlistId ? { ...playlist, artwork } : playlist
+        )
+      );
+    },
+    []
+  );
+
   const deleteSavedPlaylist = useCallback((playlistId: string) => {
     setSavedPlaylists((current) =>
       current.filter((playlist) => playlist.id !== playlistId)
@@ -1459,13 +1473,19 @@ export function useLocalAudioPlayer({
   );
 
   const playSavedPlaylist = useCallback(
-    (playlistId: string) => {
+    (playlistId: string, shuffle = false) => {
       const playlist = savedPlaylists.find((item) => item.id === playlistId);
       if (!playlist) {
         return 0;
       }
 
       const tracks = resolvePlaylistTracks(playlist, library);
+      if (shuffle) {
+        for (let index = tracks.length - 1; index > 0; index -= 1) {
+          const swapIndex = Math.floor(Math.random() * (index + 1));
+          [tracks[index], tracks[swapIndex]] = [tracks[swapIndex], tracks[index]];
+        }
+      }
       if (tracks.length === 0) {
         return 0;
       }
@@ -2246,6 +2266,7 @@ export function useLocalAudioPlayer({
       updateTrackMetadata,
       createSavedPlaylist,
       renameSavedPlaylist,
+      updateSavedPlaylistArtwork,
       deleteSavedPlaylist,
       addTrackToSavedPlaylist,
       addTracksToSavedPlaylist,
@@ -2288,6 +2309,7 @@ export function useLocalAudioPlayer({
       connectRemote,
       createSavedPlaylist,
       renameSavedPlaylist,
+      updateSavedPlaylistArtwork,
       clearQueue,
       deleteSavedPlaylist,
       isPicking,

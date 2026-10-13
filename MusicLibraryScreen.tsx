@@ -17,18 +17,6 @@ import { TrackArtwork } from "./TrackArtwork";
 import type { EditableTrackMetadata, LocalTrack } from "./useLocalAudioPlayer";
 import { type ThemeColors, useTheme } from "./theme";
 
-function splitArtistNames(artist: string) {
-  const names = artist
-    .split(/\s*;\s*|\s+\/\s+|\s+\b(?:feat(?:uring)?\.?|ft\.?)\s+/i)
-    .map((name) => name.trim())
-    .filter(Boolean);
-  return names.length > 0 ? [...new Set(names)] : ["Unknown Artist"];
-}
-
-function displayMetadata(value: string | number | undefined, fallback: string) {
-  return value === undefined || value === "" ? fallback : String(value);
-}
-
 type SortDirection = "ascending" | "descending";
 type LibraryView = "songs" | "artists" | "genres";
 type LibraryListItem =
@@ -136,8 +124,9 @@ export function MusicLibraryScreen({
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [searchQuery, setSearchQuery] = useState("");
   const [libraryView, setLibraryView] = useState<LibraryView>("songs");
-  const [isAdvancedView, setIsAdvancedView] = useState(false);
+  const [isCompactView, setIsCompactView] = useState(false);
   const [editingTrack, setEditingTrack] = useState<LocalTrack | null>(null);
+  const [selectedTrack, setSelectedTrack] = useState<LocalTrack | null>(null);
   const [sortDirection, setSortDirection] =
     useState<SortDirection>("ascending");
   const [sortField, setSortField] = useState<SortField>("name");
@@ -146,8 +135,8 @@ export function MusicLibraryScreen({
     "all",
   );
   const listExtraData = useMemo(
-    () => ({ isAdvancedView, libraryView, queuedIds, showFileType }),
-    [isAdvancedView, libraryView, queuedIds, showFileType],
+    () => ({ isCompactView, libraryView, queuedIds, showFileType }),
+    [isCompactView, libraryView, queuedIds, showFileType],
   );
   const sortLabel =
     SORT_OPTIONS.find((option) => option.field === sortField)?.label ?? "Title";
@@ -283,6 +272,90 @@ export function MusicLibraryScreen({
                 </Pressable>
               );
             })}
+          </View>
+        </Pressable>
+      </Modal>
+      <Modal
+        animationType="fade"
+        onRequestClose={() => setSelectedTrack(null)}
+        transparent
+        visible={Boolean(selectedTrack)}
+      >
+        <Pressable
+          accessibilityLabel="Close song actions"
+          onPress={() => setSelectedTrack(null)}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.trackActionSheet}>
+            {selectedTrack && (
+              <>
+                <View style={styles.trackActionHeading}>
+                  <TrackArtwork
+                    borderRadius={10}
+                    remoteToken={remoteToken}
+                    size={48}
+                    track={selectedTrack}
+                  />
+                  <View style={styles.trackDetails}>
+                    <Text numberOfLines={1} style={styles.trackActionTitle}>
+                      {selectedTrack.name}
+                    </Text>
+                    <Text numberOfLines={1} style={styles.artistName}>
+                      {selectedTrack.artist}
+                    </Text>
+                  </View>
+                </View>
+                <Pressable
+                  disabled={queuedIds.has(selectedTrack.id)}
+                  onPress={() => {
+                    onAddTrack(selectedTrack);
+                    setSelectedTrack(null);
+                  }}
+                  style={({ pressed }) => [
+                    styles.trackAction,
+                    pressed && styles.buttonPressed,
+                    queuedIds.has(selectedTrack.id) && styles.disabled,
+                  ]}
+                >
+                  <Ionicons
+                    color={colors.accent}
+                    name={queuedIds.has(selectedTrack.id) ? "checkmark" : "add"}
+                    size={21}
+                  />
+                  <Text style={styles.trackActionText}>
+                    {queuedIds.has(selectedTrack.id)
+                      ? "Already in playlist"
+                      : "Add to playlist"}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    setEditingTrack(selectedTrack);
+                    setSelectedTrack(null);
+                  }}
+                  style={({ pressed }) => [
+                    styles.trackAction,
+                    pressed && styles.buttonPressed,
+                  ]}
+                >
+                  <Ionicons color={colors.accent} name="create-outline" size={21} />
+                  <Text style={styles.trackActionText}>Edit song details</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    onRemoveTrack(selectedTrack.id);
+                    setSelectedTrack(null);
+                  }}
+                  style={({ pressed }) => [
+                    styles.trackAction,
+                    pressed && styles.buttonPressed,
+                  ]}
+                >
+                  <Ionicons color="#d92d20" name="trash-outline" size={21} />
+                  <Text style={styles.trackActionDanger}>Remove from library</Text>
+                </Pressable>
+              </>
+            )}
           </View>
         </Pressable>
       </Modal>
@@ -470,31 +543,31 @@ export function MusicLibraryScreen({
             </View>
             <Pressable
               accessibilityLabel={
-                isAdvancedView
-                  ? "Switch to simplified library view"
-                  : "Switch to advanced library view"
+                isCompactView
+                  ? "Switch to regular library view"
+                  : "Switch to compact library view"
               }
               accessibilityRole="switch"
-              accessibilityState={{ checked: isAdvancedView }}
-              onPress={() => setIsAdvancedView((advanced) => !advanced)}
+              accessibilityState={{ checked: isCompactView }}
+              onPress={() => setIsCompactView((compact) => !compact)}
               style={({ pressed }) => [
                 styles.viewToggle,
-                isAdvancedView && styles.viewToggleActive,
+                isCompactView && styles.viewToggleActive,
                 pressed && styles.buttonPressed,
               ]}
             >
               <Ionicons
-                color={isAdvancedView ? "#fff" : colors.accent}
-                name={isAdvancedView ? "list" : "options-outline"}
+                color={isCompactView ? "#fff" : colors.accent}
+                name={isCompactView ? "reorder-three" : "list-outline"}
                 size={17}
               />
               <Text
                 style={[
                   styles.viewToggleText,
-                  isAdvancedView && styles.viewToggleTextActive,
+                  isCompactView && styles.viewToggleTextActive,
                 ]}
               >
-                {isAdvancedView ? "Simple" : "Advanced"}
+                {isCompactView ? "Regular" : "Compact"}
               </Text>
             </Pressable>
           </View>
@@ -611,16 +684,6 @@ export function MusicLibraryScreen({
         data={libraryItems}
         extraData={listExtraData}
         keyExtractor={(item) => item.key}
-        ListHeaderComponent={
-          isAdvancedView &&
-          libraryView === "songs" &&
-          filteredLibrary.length > 0 ? (
-            <View style={styles.advancedListHeader}>
-              <Text style={styles.advancedListHeaderText}>SONG & ARTISTS</Text>
-              <Text style={styles.advancedListHeaderText}>METADATA</Text>
-            </View>
-          ) : null
-        }
         ListEmptyComponent={
           library.length === 0 ? (
             <View style={styles.emptyState}>
@@ -688,166 +751,64 @@ export function MusicLibraryScreen({
                 : remoteStatus === "error"
                   ? "STALE"
                   : "PC";
-          if (isAdvancedView) {
-            const artists = splitArtistNames(item.artist);
-            return (
-              <Pressable
-                accessibilityHint="Press and hold to edit file metadata"
-                accessibilityLabel={`${item.name} by ${item.artist}`}
-                delayLongPress={450}
-                onLongPress={() => setEditingTrack(item)}
-                style={({ pressed }) => [
-                  styles.advancedTrackRow,
-                  pressed && styles.trackRowPressed,
-                ]}
-              >
-                <View style={styles.advancedTitleRow}>
-                  <TrackArtwork
-                    borderRadius={7}
-                    remoteToken={remoteToken}
-                    size={30}
-                    track={item}
-                  />
-                  <Text numberOfLines={1} style={styles.advancedTrackName}>
-                    {item.name}
-                  </Text>
-                  {showFileType && (
-                    <Text style={styles.advancedFormat}>{item.extension}</Text>
-                  )}
-                  <Text style={styles.sourceBadge}>
-                    {sourceBadge}
-                  </Text>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={
-                      isQueued
-                        ? `${item.name} is already queued`
-                        : `Add ${item.name} to playlist`
-                    }
-                    disabled={isQueued}
-                    onPress={() => onAddTrack(item)}
-                    style={({ pressed }) => [
-                      styles.compactRowButton,
-                      isQueued && styles.queuedButton,
-                      pressed && !isQueued && styles.buttonPressed,
-                    ]}
-                  >
-                    <Ionicons
-                      name={isQueued ? "checkmark" : "add"}
-                      color={isQueued ? "#34c759" : colors.accent}
-                      size={18}
-                    />
-                  </Pressable>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`Remove ${item.name} from library`}
-                    onPress={() => onRemoveTrack(item.id)}
-                    style={({ pressed }) => [
-                      styles.compactRowButton,
-                      pressed && styles.buttonPressed,
-                    ]}
-                  >
-                    <Ionicons name="close" color={colors.muted} size={17} />
-                  </Pressable>
-                </View>
-
-                <View
-                  accessibilityLabel={`Artists: ${artists.join(", ")}`}
-                  style={styles.artistChips}
-                >
-                  {artists.map((artist) => (
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`Filter by artist ${artist}`}
-                      key={artist}
-                      onPress={() => setSearchQuery(artist)}
-                      style={({ pressed }) => [
-                        styles.artistChip,
-                        pressed && styles.artistChipPressed,
-                      ]}
-                    >
-                      <Text numberOfLines={1} style={styles.artistChipText}>
-                        {artist}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-
-                <Text numberOfLines={2} style={styles.metadataLine}>
-                  <Text style={styles.metadataLabel}>ALBUM ARTIST </Text>
-                  {displayMetadata(item.albumArtist, "Unknown")}
-                  <Text style={styles.metadataSeparator}> · </Text>
-                  <Text style={styles.metadataLabel}>ALBUM </Text>
-                  {displayMetadata(item.album, "Unknown")}
-                  <Text style={styles.metadataSeparator}> · </Text>
-                  <Text style={styles.metadataLabel}>GENRE </Text>
-                  {displayMetadata(item.genre, "Unknown")}
-                  <Text style={styles.metadataSeparator}> · </Text>
-                  <Text style={styles.metadataLabel}>YEAR </Text>
-                  {displayMetadata(item.year, "—")}
-                </Text>
-              </Pressable>
-            );
-          }
-
           return (
             <Pressable
-              accessibilityHint="Press and hold to edit file metadata"
+              accessibilityHint="Press and hold to edit song details"
               accessibilityLabel={`${item.name} by ${item.artist}`}
               delayLongPress={450}
               onLongPress={() => setEditingTrack(item)}
               style={({ pressed }) => [
                 styles.trackRow,
+                isCompactView && styles.trackRowCompact,
                 pressed && styles.trackRowPressed,
               ]}
             >
-              <TrackArtwork remoteToken={remoteToken} track={item} />
+              <TrackArtwork
+                borderRadius={isCompactView ? 8 : 14}
+                remoteToken={remoteToken}
+                size={isCompactView ? 46 : 76}
+                track={item}
+              />
               <View style={styles.trackDetails}>
-                <Text numberOfLines={1} style={styles.trackName}>
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.trackName,
+                    isCompactView && styles.trackNameCompact,
+                  ]}
+                >
                   {item.name}
                 </Text>
                 <Text numberOfLines={1} style={styles.artistName}>
                   {item.artist}
                   {item.album ? ` • ${item.album}` : ""}
                 </Text>
+                {!isCompactView && (
+                  <View style={styles.trackBadges}>
+                    <Text style={styles.sourceBadge}>{sourceBadge}</Text>
+                    {showFileType && (
+                      <Text style={styles.format}>{item.extension}</Text>
+                    )}
+                  </View>
+                )}
               </View>
-              {showFileType && (
+              {isCompactView && showFileType && (
                 <Text style={styles.format}>{item.extension}</Text>
               )}
-              <Text style={styles.sourceBadge}>
-                {sourceBadge}
-              </Text>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={
-                  isQueued
-                    ? `${item.name} is already queued`
-                    : `Add ${item.name} to playlist`
-                }
-                disabled={isQueued}
-                onPress={() => onAddTrack(item)}
-                style={({ pressed }) => [
-                  styles.rowButton,
-                  isQueued && styles.queuedButton,
-                  pressed && !isQueued && styles.buttonPressed,
-                ]}
-              >
-                <Ionicons
-                  name={isQueued ? "checkmark" : "add"}
-                  color={isQueued ? "#34c759" : colors.accent}
-                  size={21}
-                />
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Remove ${item.name} from library`}
-                onPress={() => onRemoveTrack(item.id)}
+                accessibilityLabel={`More actions for ${item.name}`}
+                onPress={() => setSelectedTrack(item)}
                 style={({ pressed }) => [
                   styles.rowButton,
                   pressed && styles.buttonPressed,
                 ]}
               >
-                <Ionicons name="close-circle" color={colors.muted} size={21} />
+                <Ionicons
+                  name="ellipsis-vertical"
+                  color={isQueued ? colors.accent : colors.secondaryText}
+                  size={21}
+                />
               </Pressable>
             </Pressable>
           );
@@ -1140,9 +1101,9 @@ const createStyles = (colors: ThemeColors) =>
       paddingVertical: 0,
     },
     listContent: {
-      gap: 8,
+      gap: 4,
       paddingBottom: 20,
-      paddingHorizontal: 14,
+      paddingHorizontal: 18,
     },
     groupHeader: {
       alignItems: "center",
@@ -1226,13 +1187,18 @@ const createStyles = (colors: ThemeColors) =>
     },
     trackRow: {
       alignItems: "center",
-      backgroundColor: colors.surface,
-      borderRadius: 14,
       flexDirection: "row",
-      gap: 9,
-      minHeight: 64,
-      paddingHorizontal: 10,
-      paddingVertical: 8,
+      gap: 14,
+      minHeight: 96,
+      paddingHorizontal: 4,
+      paddingVertical: 10,
+    },
+    trackRowCompact: {
+      borderBottomColor: colors.border,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      gap: 10,
+      minHeight: 62,
+      paddingVertical: 7,
     },
     trackRowPressed: {
       opacity: 0.72,
@@ -1251,13 +1217,18 @@ const createStyles = (colors: ThemeColors) =>
     },
     trackName: {
       color: colors.text,
+      fontSize: 18,
+      fontWeight: "700",
+      letterSpacing: -0.25,
+    },
+    trackNameCompact: {
       fontSize: 14,
-      fontWeight: "600",
+      letterSpacing: 0,
     },
     artistName: {
       color: colors.secondaryText,
-      fontSize: 11,
-      marginTop: 3,
+      fontSize: 12,
+      marginTop: 5,
     },
     format: {
       color: colors.muted,
@@ -1266,9 +1237,15 @@ const createStyles = (colors: ThemeColors) =>
     },
     sourceBadge: {
       color: colors.accent,
-      fontSize: 8,
+      fontSize: 9,
       fontWeight: "800",
       letterSpacing: 0.4,
+    },
+    trackBadges: {
+      alignItems: "center",
+      flexDirection: "row",
+      gap: 7,
+      marginTop: 8,
     },
     rowButton: {
       alignItems: "center",
@@ -1279,6 +1256,46 @@ const createStyles = (colors: ThemeColors) =>
     },
     queuedButton: {
       backgroundColor: "#effaf1",
+    },
+    trackActionSheet: {
+      backgroundColor: colors.background,
+      borderTopLeftRadius: 24,
+      borderTopRightRadius: 24,
+      paddingBottom: 28,
+      paddingHorizontal: 18,
+      paddingTop: 18,
+    },
+    trackActionHeading: {
+      alignItems: "center",
+      borderBottomColor: colors.border,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      flexDirection: "row",
+      gap: 12,
+      marginBottom: 8,
+      paddingBottom: 16,
+    },
+    trackActionTitle: {
+      color: colors.text,
+      fontSize: 16,
+      fontWeight: "700",
+    },
+    trackAction: {
+      alignItems: "center",
+      borderRadius: 12,
+      flexDirection: "row",
+      gap: 12,
+      minHeight: 52,
+      paddingHorizontal: 10,
+    },
+    trackActionText: {
+      color: colors.text,
+      fontSize: 15,
+      fontWeight: "600",
+    },
+    trackActionDanger: {
+      color: "#d92d20",
+      fontSize: 15,
+      fontWeight: "600",
     },
     viewToggle: {
       alignItems: "center",

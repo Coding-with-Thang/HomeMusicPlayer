@@ -4,6 +4,7 @@ import {
   Alert,
   BackHandler,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -13,6 +14,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { LocalTrack, SavedPlaylist } from './useLocalAudioPlayer';
 import { type ThemeColors, useTheme } from './theme';
@@ -24,16 +26,18 @@ type SavedPlaylistsScreenProps = {
   onAddTrack: (playlistId: string, trackId: string) => void;
   onAddTracks: (playlistId: string, trackIds: string[]) => void;
   onBack: () => void;
+  onChooseArtwork: (playlistId: string) => Promise<void>;
   onCreate: (name: string) => string | null;
   onDelete: (playlistId: string) => void;
   onOpenLibrary: () => void;
-  onPlayPlaylist: (playlistId: string) => void;
+  onPlayPlaylist: (playlistId: string, shuffle?: boolean) => void;
   onMoveTrack: (
     playlistId: string,
     trackId: string,
     direction: -1 | 1
   ) => void;
   onRemoveTrack: (playlistId: string, trackId: string) => void;
+  onRemoveArtwork: (playlistId: string) => void;
   onRename: (playlistId: string, name: string) => boolean;
   playlists: SavedPlaylist[];
   remoteStatus: 'disconnected' | 'connecting' | 'connected' | 'syncing' | 'error';
@@ -46,12 +50,14 @@ export function SavedPlaylistsScreen({
   onAddTrack,
   onAddTracks,
   onBack,
+  onChooseArtwork,
   onCreate,
   onDelete,
   onOpenLibrary,
   onPlayPlaylist,
   onMoveTrack,
   onRemoveTrack,
+  onRemoveArtwork,
   onRename,
   playlists,
   remoteStatus,
@@ -222,77 +228,112 @@ export function SavedPlaylistsScreen({
           <Ionicons name="chevron-back" color={colors.accent} size={24} />
         </Pressable>
         <Text numberOfLines={1} style={styles.headerTitle}>
-          {selectedPlaylist?.name ?? 'Playlists'}
+          {selectedPlaylist ? '' : 'Playlists'}
         </Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Create playlist"
-          onPress={() => setIsCreateOpen(true)}
+          accessibilityLabel={
+            selectedPlaylist ? 'Playlist settings' : 'Create playlist'
+          }
+          onPress={() =>
+            selectedPlaylist
+              ? openPlaylistConfig(selectedPlaylist)
+              : setIsCreateOpen(true)
+          }
           style={({ pressed }) => [
             styles.headerButton,
             pressed && styles.buttonPressed,
           ]}
         >
-          <Ionicons name="add" color={colors.accent} size={26} />
+          <Ionicons
+            name={selectedPlaylist ? 'ellipsis-vertical' : 'add'}
+            color={colors.accent}
+            size={26}
+          />
         </Pressable>
       </View>
 
       {selectedPlaylist ? (
         <>
           <View style={styles.detailHero}>
-            <View style={styles.playlistArtwork}>
-              <Ionicons name="musical-notes" color="#fff" size={42} />
-            </View>
-            <View style={styles.detailInfo}>
-              <Text numberOfLines={2} style={styles.detailTitle}>
-                {selectedPlaylist.name}
-              </Text>
-              <Text style={styles.detailCount}>
-                {selectedTracks.length}{' '}
-                {selectedTracks.length === 1 ? 'song' : 'songs'}
-              </Text>
-              <View style={styles.detailActions}>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Play ${selectedPlaylist.name}`}
-                  disabled={selectedTracks.length === 0}
-                  onPress={() => onPlayPlaylist(selectedPlaylist.id)}
-                  style={({ pressed }) => [
-                    styles.primarySmallButton,
-                    selectedTracks.length === 0 && styles.disabled,
-                    pressed && styles.primaryButtonPressed,
-                  ]}
-                >
-                  <Ionicons name="play" color="#fff" size={17} />
-                  <Text style={styles.primarySmallText}>Play</Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Add songs to playlist"
-                  onPress={() => setIsTrackPickerOpen(true)}
-                  style={({ pressed }) => [
-                    styles.secondarySmallButton,
-                    pressed && styles.buttonPressed,
-                  ]}
-                >
-                  <Ionicons name="add" color={colors.accent} size={18} />
-                  <Text style={styles.secondarySmallText}>Add Songs</Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Add playlist to live queue"
-                  disabled={selectedTracks.length === 0}
-                  onPress={() => onAddPlaylistToQueue(selectedPlaylist.id)}
-                  style={({ pressed }) => [
-                    styles.secondarySmallButton,
-                    selectedTracks.length === 0 && styles.disabled,
-                    pressed && styles.buttonPressed,
-                  ]}
-                >
-                  <Ionicons name="list" color={colors.accent} size={17} />
-                  <Text style={styles.secondarySmallText}>Queue</Text>
-                </Pressable>
+            <Pressable
+              accessibilityLabel={
+                selectedPlaylist.artwork
+                  ? 'Change playlist image'
+                  : 'Add playlist image'
+              }
+              onPress={() => void onChooseArtwork(selectedPlaylist.id)}
+              style={({ pressed }) => [
+                styles.playlistArtwork,
+                pressed && styles.playlistRowPressed,
+              ]}
+            >
+              {selectedPlaylist.artwork ? (
+                <Image
+                  accessibilityLabel={`Cover for ${selectedPlaylist.name}`}
+                  source={{ uri: selectedPlaylist.artwork }}
+                  style={styles.playlistArtworkImage}
+                />
+              ) : (
+                <Ionicons name="image-outline" color="#fff" size={46} />
+              )}
+              <View style={styles.artworkEditBadge}>
+                <Ionicons name="camera" color="#fff" size={15} />
               </View>
+            </Pressable>
+            <Text numberOfLines={2} style={styles.detailTitle}>
+              {selectedPlaylist.name}
+            </Text>
+            <Text style={styles.detailCount}>
+              {selectedTracks.length}{' '}
+              {selectedTracks.length === 1 ? 'song' : 'songs'}
+            </Text>
+            <View style={styles.detailActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Shuffle ${selectedPlaylist.name}`}
+                disabled={selectedTracks.length === 0}
+                onPress={() => onPlayPlaylist(selectedPlaylist.id, true)}
+                style={({ pressed }) => [
+                  styles.heroActionButton,
+                  selectedTracks.length === 0 && styles.disabled,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Ionicons name="shuffle" color={colors.text} size={17} />
+                <Text style={styles.heroActionText}>Shuffle</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Play ${selectedPlaylist.name}`}
+                disabled={selectedTracks.length === 0}
+                onPress={() => onPlayPlaylist(selectedPlaylist.id)}
+                style={({ pressed }) => [
+                  styles.heroActionButton,
+                  selectedTracks.length === 0 && styles.disabled,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Ionicons name="play" color={colors.text} size={17} />
+                <Text style={styles.heroActionText}>Play</Text>
+              </Pressable>
+            </View>
+            <View style={styles.detailSecondaryActions}>
+              <Pressable
+                onPress={() => setIsTrackPickerOpen(true)}
+                style={styles.detailTextButton}
+              >
+                <Ionicons name="add" color={colors.accent} size={18} />
+                <Text style={styles.detailTextButtonLabel}>Add songs</Text>
+              </Pressable>
+              <Pressable
+                disabled={selectedTracks.length === 0}
+                onPress={() => onAddPlaylistToQueue(selectedPlaylist.id)}
+                style={styles.detailTextButton}
+              >
+                <Ionicons name="list" color={colors.accent} size={17} />
+                <Text style={styles.detailTextButtonLabel}>Add to queue</Text>
+              </Pressable>
             </View>
           </View>
 
@@ -500,7 +541,15 @@ export function SavedPlaylistsScreen({
                   ]}
                 >
                   <View style={styles.rowArtwork}>
-                    <Ionicons name="musical-notes" color="#fff" size={25} />
+                    {item.artwork ? (
+                      <Image
+                        accessibilityLabel={`Cover for ${item.name}`}
+                        source={{ uri: item.artwork }}
+                        style={styles.rowArtworkImage}
+                      />
+                    ) : (
+                      <Ionicons name="musical-notes" color="#fff" size={30} />
+                    )}
                   </View>
                   <View style={styles.playlistDetails}>
                     <Text numberOfLines={1} style={styles.playlistName}>
@@ -511,7 +560,6 @@ export function SavedPlaylistsScreen({
                       {item.trackIds.length === 1 ? 'song' : 'songs'}
                     </Text>
                   </View>
-                  <Ionicons name="chevron-forward" color={colors.muted} size={20} />
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
@@ -523,7 +571,7 @@ export function SavedPlaylistsScreen({
                   ]}
                 >
                   <Ionicons
-                    name="settings-outline"
+                    name="ellipsis-vertical"
                     color={colors.secondaryText}
                     size={20}
                   />
@@ -605,8 +653,34 @@ export function SavedPlaylistsScreen({
           <View style={styles.createModal}>
             <Text style={styles.modalTitle}>Playlist Settings</Text>
             <Text style={styles.modalSubtitle}>
-              Change the name shown for this playlist.
+              Change the name or cover shown for this playlist.
             </Text>
+            <View style={styles.coverActions}>
+              <Pressable
+                onPress={() => void onChooseArtwork(configPlaylist!.id)}
+                style={({ pressed }) => [
+                  styles.coverButton,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Ionicons name="image-outline" color={colors.accent} size={19} />
+                <Text style={styles.coverButtonText}>
+                  {configPlaylist?.artwork ? 'Change image' : 'Add image'}
+                </Text>
+              </Pressable>
+              {configPlaylist?.artwork && (
+                <Pressable
+                  onPress={() => onRemoveArtwork(configPlaylist.id)}
+                  style={({ pressed }) => [
+                    styles.coverButton,
+                    pressed && styles.buttonPressed,
+                  ]}
+                >
+                  <Ionicons name="trash-outline" color="#d92d20" size={18} />
+                  <Text style={styles.removeCoverText}>Remove image</Text>
+                </Pressable>
+              )}
+            </View>
             <Text style={styles.fieldLabel}>PLAYLIST NAME</Text>
             <TextInput
               autoFocus
@@ -657,7 +731,7 @@ export function SavedPlaylistsScreen({
         presentationStyle="pageSheet"
         visible={isTrackPickerOpen}
       >
-        <View style={styles.pickerScreen}>
+        <SafeAreaView style={styles.pickerScreen}>
           <View style={styles.pickerHeader}>
             <Pressable
               accessibilityRole="button"
@@ -808,7 +882,7 @@ export function SavedPlaylistsScreen({
               );
             }}
           />
-        </View>
+        </SafeAreaView>
       </Modal>
     </View>
   );
@@ -872,45 +946,42 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     paddingHorizontal: 11,
   },
   libraryButtonText: { color: colors.accent, fontSize: 12, fontWeight: '700' },
-  playlistList: { gap: 9, paddingHorizontal: 14, paddingBottom: 20 },
+  playlistList: { gap: 4, paddingHorizontal: 18, paddingBottom: 20 },
   emptyList: { flex: 1 },
   playlistRow: {
     alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderRadius: 15,
     flexDirection: 'row',
-    minHeight: 72,
+    minHeight: 96,
     overflow: 'hidden',
-    paddingRight: 7,
   },
   playlistMainAction: {
     alignItems: 'center',
     flex: 1,
     flexDirection: 'row',
-    gap: 12,
-    minHeight: 72,
-    padding: 10,
+    gap: 16,
+    minHeight: 96,
+    paddingVertical: 10,
   },
   playlistRowPressed: { opacity: 0.7 },
   rowArtwork: {
     alignItems: 'center',
     backgroundColor: colors.accent,
-    borderRadius: 11,
-    height: 50,
+    borderRadius: 14,
+    height: 76,
     justifyContent: 'center',
-    width: 50,
+    overflow: 'hidden',
+    width: 76,
   },
+  rowArtworkImage: { height: '100%', width: '100%' },
   playlistDetails: { flex: 1 },
-  playlistName: { color: colors.text, fontSize: 16, fontWeight: '700' },
-  playlistCount: { color: colors.secondaryText, fontSize: 12, marginTop: 3 },
+  playlistName: { color: colors.text, fontSize: 18, fontWeight: '700' },
+  playlistCount: { color: colors.secondaryText, fontSize: 12, marginTop: 6 },
   configButton: {
     alignItems: 'center',
-    borderLeftColor: colors.border,
-    borderLeftWidth: StyleSheet.hairlineWidth,
     borderRadius: 18,
-    height: 36,
+    height: 44,
     justifyContent: 'center',
-    width: 40,
+    width: 38,
   },
   emptyState: {
     alignItems: 'center',
@@ -952,53 +1023,75 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
   primaryButtonPressed: { backgroundColor: colors.accentPressed },
   createButtonText: { color: '#fff', fontSize: 14, fontWeight: '700' },
   detailHero: {
-    backgroundColor: colors.surface,
-    flexDirection: 'row',
-    gap: 16,
-    padding: 20,
+    alignItems: 'center',
+    backgroundColor: colors.accentSoft,
+    paddingBottom: 18,
+    paddingHorizontal: 20,
+    paddingTop: 20,
   },
   playlistArtwork: {
     alignItems: 'center',
     backgroundColor: colors.accent,
-    borderRadius: 18,
-    height: 112,
+    borderRadius: 22,
+    height: 138,
     justifyContent: 'center',
-    width: 112,
+    marginBottom: 18,
+    overflow: 'hidden',
+    width: 138,
   },
-  detailInfo: { flex: 1, justifyContent: 'center' },
+  playlistArtworkImage: { height: '100%', width: '100%' },
+  artworkEditBadge: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.58)',
+    borderColor: '#fff',
+    borderRadius: 16,
+    borderWidth: 2,
+    bottom: 8,
+    height: 30,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 8,
+    width: 30,
+  },
   detailTitle: {
     color: colors.text,
-    fontSize: 23,
+    fontSize: 25,
     fontWeight: '700',
     letterSpacing: -0.5,
+    textAlign: 'center',
   },
   detailCount: { color: colors.secondaryText, fontSize: 12, marginTop: 4 },
   detailActions: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    gap: 12,
+    marginTop: 18,
+    width: '100%',
+  },
+  heroActionButton: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: 22,
+    flex: 1,
+    flexDirection: 'row',
     gap: 7,
-    marginTop: 12,
+    height: 44,
+    justifyContent: 'center',
   },
-  primarySmallButton: {
+  heroActionText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  detailSecondaryActions: {
     alignItems: 'center',
-    backgroundColor: colors.accent,
-    borderRadius: 14,
     flexDirection: 'row',
-    gap: 3,
-    height: 32,
-    paddingHorizontal: 10,
+    gap: 18,
+    justifyContent: 'center',
+    marginTop: 13,
   },
-  primarySmallText: { color: '#fff', fontSize: 11, fontWeight: '700' },
-  secondarySmallButton: {
+  detailTextButton: {
     alignItems: 'center',
-    backgroundColor: colors.accentSoft,
-    borderRadius: 14,
     flexDirection: 'row',
-    gap: 3,
-    height: 32,
-    paddingHorizontal: 9,
+    gap: 4,
+    minHeight: 32,
   },
-  secondarySmallText: { color: colors.accent, fontSize: 11, fontWeight: '700' },
+  detailTextButtonLabel: { color: colors.accent, fontSize: 12, fontWeight: '700' },
   disabled: { opacity: 0.35 },
   trackList: { gap: 7, padding: 12 },
   trackRow: {
@@ -1074,6 +1167,23 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     paddingHorizontal: 12,
   },
   configNameInput: { marginTop: 7 },
+  coverActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 14,
+  },
+  coverButton: {
+    alignItems: 'center',
+    backgroundColor: colors.elevated,
+    borderRadius: 11,
+    flexDirection: 'row',
+    gap: 6,
+    minHeight: 40,
+    paddingHorizontal: 12,
+  },
+  coverButtonText: { color: colors.accent, fontSize: 12, fontWeight: '700' },
+  removeCoverText: { color: '#d92d20', fontSize: 12, fontWeight: '700' },
   errorText: { color: '#d92d20', fontSize: 11, marginTop: 6 },
   unavailableBadge: {
     color: '#d92d20',

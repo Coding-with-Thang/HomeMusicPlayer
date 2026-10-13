@@ -111,6 +111,7 @@ function AppContent() {
     updateTrackMetadata,
     createSavedPlaylist,
     renameSavedPlaylist,
+    updateSavedPlaylistArtwork,
     deleteSavedPlaylist,
     addTrackToSavedPlaylist,
     addTracksToSavedPlaylist,
@@ -412,6 +413,58 @@ function AppContent() {
       }
     }
   };
+  const choosePlaylistArtwork = async (playlistId: string) => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        type: "image/*",
+      });
+      if (result.canceled) {
+        return;
+      }
+
+      const selectedImage = result.assets[0];
+      const extension =
+        selectedImage.name.split(".").pop()?.replace(/[^a-z0-9]/gi, "") ||
+        "jpg";
+      const destination = new File(
+        Paths.document,
+        `playlist-${playlistId}-${Date.now()}.${extension}`,
+      );
+      await copyAsync({ from: selectedImage.uri, to: destination.uri });
+
+      const previousArtwork = savedPlaylists.find(
+        (playlist) => playlist.id === playlistId,
+      )?.artwork;
+      updateSavedPlaylistArtwork(playlistId, destination.uri);
+      if (previousArtwork) {
+        try {
+          new File(previousArtwork).delete();
+        } catch {
+          // The new cover remains valid if the old file is unavailable.
+        }
+      }
+    } catch {
+      Alert.alert("Could not use image", "Choose another image and try again.");
+    }
+  };
+  const removePlaylistArtwork = (playlistId: string) => {
+    const previousArtwork = savedPlaylists.find(
+      (playlist) => playlist.id === playlistId,
+    )?.artwork;
+    updateSavedPlaylistArtwork(playlistId, undefined);
+    if (previousArtwork) {
+      try {
+        new File(previousArtwork).delete();
+      } catch {
+        // The playlist can still use its default cover.
+      }
+    }
+  };
+  const deletePlaylist = (playlistId: string) => {
+    removePlaylistArtwork(playlistId);
+    deleteSavedPlaylist(playlistId);
+  };
   const confirmClearQueue = () => {
     if (queue.length === 0) {
       return;
@@ -478,16 +531,18 @@ function AppContent() {
           onAddTrack={addTrackToSavedPlaylist}
           onAddTracks={addTracksToSavedPlaylist}
           onBack={() => setScreen("library")}
+          onChooseArtwork={choosePlaylistArtwork}
           onCreate={createSavedPlaylist}
-          onDelete={deleteSavedPlaylist}
+          onDelete={deletePlaylist}
           onOpenLibrary={() => setScreen("library")}
-          onPlayPlaylist={(playlistId) => {
-            if (playSavedPlaylist(playlistId) > 0) {
+          onPlayPlaylist={(playlistId, shuffle) => {
+            if (playSavedPlaylist(playlistId, shuffle) > 0) {
               setScreen("playlist");
             }
           }}
           onMoveTrack={moveTrackInSavedPlaylist}
           onRemoveTrack={removeTrackFromSavedPlaylist}
+          onRemoveArtwork={removePlaylistArtwork}
           onRename={renameSavedPlaylist}
           playlists={savedPlaylists}
           remoteStatus={remoteStatus}
